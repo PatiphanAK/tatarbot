@@ -9,8 +9,9 @@ const FENCE: &str = "```";
 const REOPEN_FENCE: &str = "```\n";
 const CLOSE_FENCE: &str = "\n```";
 
-pub const GENERIC_FAILURE: &str = "💥 Something went wrong on my side. Please try again.";
-pub const EMPTY_PROMPT: &str = "👋 Send me a message, e.g. `/chat message: hello` or mention me.";
+const GENERIC_FAILURE: &str = "💥 Something went wrong on my side. Please try again.";
+pub const EMPTY_PROMPT: &str =
+    "👋 Mention me with a message, e.g. `@TatarBot hello`, or reply to one of my messages.";
 
 pub fn error_message(err: &ChatError) -> String {
     match err {

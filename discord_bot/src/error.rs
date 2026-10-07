@@ -9,11 +9,11 @@ pub enum AppError {
     #[error("failed to build agent HTTP client: {0}")]
     AgentClient(#[from] reqwest::Error),
     #[error("discord client error: {0}")]
-    Discord(#[source] Box<poise::serenity_prelude::Error>),
+    Discord(#[source] Box<serenity::Error>),
 }
 
-impl From<poise::serenity_prelude::Error> for AppError {
-    fn from(err: poise::serenity_prelude::Error) -> Self {
+impl From<serenity::Error> for AppError {
+    fn from(err: serenity::Error) -> Self {
         AppError::Discord(Box::new(err))
     }
 }

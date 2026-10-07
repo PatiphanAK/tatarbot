@@ -10,7 +10,7 @@ Discord ──(Gateway WebSocket)──▶ TatarBot ──(AgentPort / HTTP)─�
 Inside TatarBot (hexagonal / ports and adapters):
 
 ```text
-adapters/inbound/discord        Discord adapter (poise/serenity)
+adapters/inbound/discord        Discord adapter (serenity, MESSAGE_CREATE)
         │
         ▼
 ChatService                     inbound port
@@ -34,8 +34,6 @@ adapters/outbound/agent_http    Agent HTTP adapter (reqwest) ──▶ Agent Run
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `DISCORD_TOKEN` | yes | – | Bot token |
-| `DISCORD_GUILD_ID` | no | – | Register slash commands in one guild (instant) |
-| `DISCORD_RESPOND_TO_MENTIONS` | no | `true` | Also answer @mentions and DMs |
 | `AGENT_BASE_URL` | no | `http://localhost:8080` | Agent Runtime base URL |
 | `AGENT_API_KEY` | no | – | Sent as `Authorization: Bearer <key>` |
 | `AGENT_TIMEOUT_SECS` | no | `120` | Request timeout |
@@ -63,8 +61,24 @@ make check    # fmt check + clippy + tests
 make help     # all targets
 ```
 
-Invite the bot with the `bot` and `applications.commands` scopes, plus the Send Messages and
-Read Message History permissions. No privileged intents are needed: Discord delivers message
-content for DMs and for messages that mention the bot.
+Invite the bot with the `bot` scope and the **View Channels**, **Send Messages** and
+**Read Message History** permissions.
 
-Usage: `/chat message:<text>`, or mention the bot or DM it.
+In the Developer Portal, turn on **Bot → Privileged Gateway Intents → Message Content Intent**.
+It is required to read replies to the bot that don't ping it. Without it, the bot fails to
+start with "Disallowed intents".
+
+## Usage
+
+The bot reacts to `MESSAGE_CREATE` events only. There are no slash commands.
+
+* `@TatarBot what is Rust?`: the bot responds to messages that mention it.
+* Replying to one of the bot's messages also works, with or without the reply ping.
+* Normal chat that doesn't mention the bot is ignored, and so are messages from bots
+  (including itself), so it can't loop.
+
+The mention is stripped before the text is sent to the agent. A typing indicator shows
+while the agent works, and the answer is posted as a normal channel message (not a reply),
+split at Discord's 2000-character limit.
+
+On startup the bot deletes the `/chat` slash command registered by earlier versions.

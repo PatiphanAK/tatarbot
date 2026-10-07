@@ -1,6 +1,6 @@
 //! Discord -> domain conversions.
 
-use poise::serenity_prelude::{ChannelId, GuildId, UserId};
+use serenity::all::{ChannelId, GuildId, UserId};
 
 use crate::domain::ConversationId;
 
