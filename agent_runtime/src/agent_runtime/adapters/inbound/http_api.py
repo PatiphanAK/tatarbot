@@ -1,0 +1,142 @@
+"""Inbound HTTP adapter: translates HTTP to `ChatService` calls.
+
+Wire contract (unchanged from TatarBot's `AgentPort` HTTP adapter):
+
+    POST /v1/chat  {"message": str, "conversation_id": str}
+    200 {"message": str, "conversation_id": str}
+    4xx/5xx {"error": str}
+"""
+
+import logging
+import secrets
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
+
+from agent_runtime.application import ChatService, ModelPort
+from agent_runtime.domain import (
+    InvalidInputError,
+    ModelError,
+    ModelRequestRejectedError,
+    ModelResponseError,
+    ModelTimeoutError,
+    ModelUnavailableError,
+)
+
+log = logging.getLogger(__name__)
+
+MAX_MESSAGE_LENGTH = 16_000
+
+
+class ChatRequestBody(BaseModel):
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+    conversation_id: str = Field(min_length=1, max_length=256)
+
+
+class ChatResponseBody(BaseModel):
+    message: str
+    conversation_id: str
+
+
+class ErrorBody(BaseModel):
+    error: str
+
+
+class ApiError(Exception):
+    def __init__(self, status_code: int, message: str, headers: dict[str, str] | None = None):
+        self.status_code = status_code
+        self.message = message
+        self.headers = headers
+
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _require_api_key(api_key: str):
+    expected = api_key.encode()
+
+    async def check(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    ) -> None:
+        if credentials is None or not secrets.compare_digest(
+            credentials.credentials.encode(), expected
+        ):
+            raise ApiError(401, "invalid or missing API key", {"WWW-Authenticate": "Bearer"})
+
+    return check
+
+
+def build_router(chat_service: ChatService, model: ModelPort, api_key: str) -> APIRouter:
+    router = APIRouter()
+
+    @router.post(
+        "/v1/chat",
+        response_model=ChatResponseBody,
+        dependencies=[Depends(_require_api_key(api_key))],
+        responses={code: {"model": ErrorBody} for code in (401, 422, 502, 503, 504)},
+    )
+    async def chat(body: ChatRequestBody) -> ChatResponseBody:
+        reply = await chat_service.chat(body.conversation_id, body.message)
+        return ChatResponseBody(message=reply, conversation_id=body.conversation_id)
+
+    @router.get("/health")
+    async def health() -> dict[str, str]:
+        """Liveness: the process is up and serving HTTP."""
+        return {"status": "ok"}
+
+    @router.get("/ready")
+    async def ready() -> JSONResponse:
+        """Readiness: the model backend is reachable and serves the model."""
+        model_ready = await model.is_ready()
+        return JSONResponse(
+            status_code=200 if model_ready else 503,
+            content={"status": "ready" if model_ready else "not_ready", "model": model_ready},
+        )
+
+    return router
+
+
+# Model failures -> HTTP status. Messages are fixed strings: nothing from
+# upstream bodies, URLs or credentials reaches the client.
+_MODEL_ERRORS: list[tuple[type[ModelError], int, str]] = [
+    (ModelTimeoutError, 504, "model timed out"),
+    (ModelUnavailableError, 503, "model unavailable"),
+    (ModelRequestRejectedError, 502, "model rejected the request"),
+    (ModelResponseError, 502, "invalid model response"),
+]
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ApiError)
+    async def api_error(_: Request, exc: ApiError) -> JSONResponse:
+        return JSONResponse({"error": exc.message}, exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'][1:]) or 'body'}: {err['msg']}"
+            for err in exc.errors()
+        )
+        return JSONResponse({"error": f"invalid request: {problems}"}, 422)
+
+    @app.exception_handler(InvalidInputError)
+    async def invalid_input(_: Request, exc: InvalidInputError) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, 422)
+
+    @app.exception_handler(ModelError)
+    async def model_error(_: Request, exc: ModelError) -> JSONResponse:
+        for kind, status, message in _MODEL_ERRORS:
+            if isinstance(exc, kind):
+                log.warning("model error: %s", exc)
+                return JSONResponse({"error": message}, status)
+        log.error("unhandled model error: %r", exc)
+        return JSONResponse({"error": "model error"}, 502)
+
+    @app.exception_handler(Exception)
+    async def unexpected(_: Request, exc: Exception) -> JSONResponse:
+        log.exception("unhandled error", exc_info=exc)
+        return JSONResponse({"error": "internal error"}, 500)
