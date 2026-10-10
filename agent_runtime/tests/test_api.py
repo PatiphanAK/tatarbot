@@ -1,5 +1,5 @@
 import pytest
-from conftest import API_KEY, SYSTEM_PROMPT, FakeModel
+from conftest import API_KEY, SYSTEM_EN, FakeModel
 from fastapi.testclient import TestClient
 
 from agent_runtime.domain import (
@@ -51,7 +51,7 @@ def test_chat_returns_reply(client, model):
     assert response.json() == {"message": "reply to: Hello", "conversation_id": "discord:1:2:3"}
     [request] = model.requests
     assert [(m.role, m.content) for m in request.messages] == [
-        (Role.SYSTEM, SYSTEM_PROMPT),
+        (Role.SYSTEM, SYSTEM_EN),
         (Role.USER, "Hello"),
     ]
 
@@ -63,7 +63,7 @@ def test_chat_preserves_history_per_conversation(client, model):
 
     third = model.requests[2]
     assert [(m.role, m.content) for m in third.messages] == [
-        (Role.SYSTEM, SYSTEM_PROMPT),
+        (Role.SYSTEM, SYSTEM_EN),
         (Role.USER, "first"),
         (Role.ASSISTANT, "reply to: first"),
         (Role.USER, "second"),
@@ -137,7 +137,7 @@ def test_failed_turn_is_not_stored(settings):
         client.post("/v1/chat", json=BODY, headers=AUTH)
         client.post("/v1/chat", json={**BODY, "message": "retry"}, headers=AUTH)
 
-    assert [m.content for m in model.requests[1].messages] == [SYSTEM_PROMPT, "retry"]
+    assert [m.content for m in model.requests[1].messages] == [SYSTEM_EN, "retry"]
 
 
 def test_health_needs_no_auth(client):

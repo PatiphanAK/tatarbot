@@ -10,8 +10,15 @@ from fastapi import FastAPI
 
 from agent_runtime.adapters.inbound.http_api import build_router, install_error_handlers
 from agent_runtime.adapters.outbound.memory_store import InMemoryConversationStore
+from agent_runtime.adapters.outbound.tavily import TavilySearch
 from agent_runtime.adapters.outbound.vllm import VLLMModel
-from agent_runtime.application import ChatService, ChatSettings, ConversationStore, ModelPort
+from agent_runtime.application import (
+    ChatService,
+    ChatSettings,
+    ConversationStore,
+    ModelPort,
+    SearchPort,
+)
 from agent_runtime.config import Settings
 from agent_runtime.domain import GenerationParams
 
@@ -23,6 +30,7 @@ def create_app(
     *,
     model: ModelPort | None = None,
     store: ConversationStore | None = None,
+    search: SearchPort | None = None,
 ) -> FastAPI:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
     settings = settings or Settings.from_env()
@@ -33,6 +41,10 @@ def create_app(
         timeout_seconds=settings.model_timeout_seconds,
         enable_thinking=settings.model_enable_thinking,
     )
+    if search is None and settings.tavily_api_key:
+        search = TavilySearch(
+            settings.tavily_api_key, timeout_seconds=settings.search_timeout_seconds
+        )
     store = store or InMemoryConversationStore(
         max_messages_per_conversation=max(settings.max_history_messages * 2, 2),
         max_conversations=settings.max_conversations,
@@ -47,14 +59,26 @@ def create_app(
                 max_tokens=settings.model_max_tokens,
                 temperature=settings.model_temperature,
             ),
+            guardrails_enabled=settings.guardrails_enabled,
+            max_searches=settings.search_max_searches,
+            results_per_search=settings.search_max_results,
+            turn_timeout_seconds=settings.turn_timeout_seconds,
         ),
+        search=search,
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        log.info("agent runtime started (model=%s)", settings.model_name)
+        log.info(
+            "agent runtime started (model=%s, guardrails=%s, search=%s)",
+            settings.model_name,
+            settings.guardrails_enabled,
+            "tavily" if search else "off",
+        )
         yield
         await model.aclose()
+        if search:
+            await search.aclose()
 
     app = FastAPI(title="TatarBot Agent Runtime", version="0.1.0", lifespan=lifespan)
     install_error_handlers(app)
