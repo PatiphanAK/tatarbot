@@ -4,11 +4,12 @@
 SHELL       := /bin/bash
 ENV_FILE    ?= .env
 MOCK_PORT   ?= 8080
+IMAGE       ?= tatarbot-discord:local
 LOAD_ENV    := set -a; [ -f $(ENV_FILE) ] && . ./$(ENV_FILE); set +a
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env run run-release dev mock-agent build release test lint fmt fmt-check check ci clean
+.PHONY: help env run run-release dev mock-agent build release test lint fmt fmt-check check ci clean image image-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -56,6 +57,12 @@ ci: check ## Alias for check
 
 clean: ## Remove build artifacts
 	cargo clean
+
+image: ## Build the container image ($(IMAGE))
+	docker build -t $(IMAGE) .
+
+image-run: _require-token ## Run the image with .env (a runtime on this machine: AGENT_BASE_URL=http://host.docker.internal:8080)
+	docker run --rm --env-file $(ENV_FILE) --add-host host.docker.internal:host-gateway $(IMAGE)
 
 _require-token:
 	@$(LOAD_ENV); if [ -z "$$DISCORD_TOKEN" ]; then \

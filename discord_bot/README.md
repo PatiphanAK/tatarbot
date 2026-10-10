@@ -1,10 +1,10 @@
 # TatarBot – Discord adapter
 
 TatarBot is the Discord application. It does **not** run or call LLMs. It forwards chat to the
-Agent Runtime, which talks to the Tatar Gateway or inference backend (vLLM, Ollama, …).
+Agent Runtime, which talks to an OpenAI-compatible inference backend (vLLM, Runpod, …).
 
 ```text
-Discord ──(Gateway WebSocket)──▶ TatarBot ──(AgentPort / HTTP)──▶ Agent Runtime ──(ModelPort)──▶ Tatar Gateway / inference
+Discord ──(Gateway WebSocket)──▶ TatarBot ──(AgentPort / HTTP)──▶ Agent Runtime ──(ModelPort)──▶ inference backend
 ```
 
 Inside TatarBot (hexagonal / ports and adapters):
@@ -82,3 +82,19 @@ while the agent works, and the answer is posted as a normal channel message (not
 split at Discord's 2000-character limit.
 
 On startup the bot deletes the `/chat` slash command registered by earlier versions.
+
+## Container
+
+```sh
+make image       # docker build -t tatarbot-discord:local .
+make image-run   # with .env; a runtime on this machine is http://host.docker.internal:8080
+```
+
+Release Rust build in a distroless image (glibc + CA certificates, no shell), non-root. The
+bot needs no inbound port. It stops on Ctrl-C or SIGTERM (`docker stop`, ECS) by closing the
+gateway connection, waiting at most 5 s. `DISCORD_TOKEN` and `AGENT_API_KEY` are read from
+the environment at start; nothing is baked into the image.
+
+In Compose, `AGENT_BASE_URL` is `http://agent_runtime:8080`; in ECS it is
+`http://runtime.tatarbot.internal:8080` (Cloud Map private DNS, `infra/aws/`). Run exactly
+one bot per token: two running bots both reply to every message.

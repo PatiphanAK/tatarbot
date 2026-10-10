@@ -1,0 +1,31 @@
+# Manual deploy of the Agent Runtime to ECS service tatarbot-runtime.
+# Not triggered automatically until the AWS infrastructure exists (infra/aws).
+
+name: Deploy runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch on main to deploy
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-tatarbot-runtime
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy-ecs.yml
+    with:
+      ref: ${{ inputs.ref }}
+      context: agent_runtime
+      ecr_repository: tatarbot-runtime
+      ecs_service: tatarbot-runtime
+      task_family: tatarbot-runtime
+      container_name: runtime

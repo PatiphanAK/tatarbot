@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (git-ignored). No secrets belong here: they go to SSM.
+
+region         = "ap-southeast-1"
+model_base_url = "https://api.runpod.ai/v2/<ENDPOINT_ID>/openai/v1"
+model_name     = "<served-model-name>"
+
+# runtime_extra_environment = { MODEL_ENABLE_THINKING = "false", MAX_HISTORY_MESSAGES = "20" }
+
+# Leave at 0 for the first apply; raise to 1 after the first deploy pushed images.
+runtime_desired_count = 0
+discord_desired_count = 0
+
+# budget_email = "you@example.com"
+# create_github_oidc_provider = false   # if the account already has GitHub's OIDC provider

@@ -1,0 +1,74 @@
+# CI for discord_bot only: fmt, clippy, tests, and an image build with a startup smoke test.
+# No secrets and no Discord token.
+
+name: CI discord
+
+on:
+  pull_request:
+    paths: &paths
+      - discord_bot/**
+      - compose.yaml
+      - .github/workflows/ci-discord.yml
+  push:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-discord-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.99" # keep in sync with discord_bot/Dockerfile
+
+jobs:
+  checks:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: discord_bot
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: discord_bot
+      - run: make check
+
+  image:
+    name: image build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: discord_bot
+          tags: tatarbot-discord:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=tatarbot-discord
+          cache-to: type=gha,mode=max,scope=tatarbot-discord
+      - name: Fails fast without a token
+        run: |
+          docker run --rm --read-only tatarbot-discord:ci 2>&1 | tee out.txt || true
+          grep -q 'MissingEnv("DISCORD_TOKEN")' out.txt
+      - name: Stops cleanly on SIGTERM
+        # No network, so the gateway connection keeps retrying until the signal arrives.
+        run: |
+          docker run -d --name bot --read-only --network none -e DISCORD_TOKEN=x.y.z tatarbot-discord:ci
+          sleep 3
+          docker stop -t 15 bot
+          test "$(docker inspect -f '{{.State.ExitCode}}' bot)" = 0
+          docker logs bot 2>&1 | grep -q 'shutting down'

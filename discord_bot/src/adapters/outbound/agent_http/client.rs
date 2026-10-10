@@ -128,6 +128,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_compose_and_cloud_map_hostnames() {
+        for base in [
+            "http://agent_runtime:8080",
+            "http://runtime.tatarbot.internal:8080",
+        ] {
+            assert_eq!(
+                client(base, None).chat_url.as_str(),
+                format!("{base}/v1/chat")
+            );
+        }
+    }
+
+    #[test]
     fn sends_bearer_token_only_when_configured() {
         assert_eq!(
             auth_header(&client("http://agent", Some("secret"))).as_deref(),

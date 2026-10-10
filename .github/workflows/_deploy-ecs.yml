@@ -1,0 +1,140 @@
+# Reusable: deploy one service image to its ECS service.
+#
+# 1. Only commits already on main can be deployed.
+# 2. The image is tagged sha-<commit>; ECR tags are immutable, so an existing tag is reused
+#    and never rebuilt.
+# 3. A new task-definition revision is rendered from the live one with only the image
+#    changed; ECS rolls the service and the job waits for it to become stable.
+#
+# Requires, in the `production` environment (or repository) variables:
+#   AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECS_CLUSTER    (terraform output github_actions_variables)
+# No long-lived AWS keys: the job assumes the role through GitHub OIDC.
+
+name: Deploy to ECS (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit, branch or tag to deploy (must be on main)
+        type: string
+        required: true
+      context:
+        description: Docker build context (service directory)
+        type: string
+        required: true
+      ecr_repository:
+        type: string
+        required: true
+      ecs_service:
+        type: string
+        required: true
+      task_family:
+        type: string
+        required: true
+      container_name:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: deploy ${{ inputs.ecs_service }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+    steps:
+      - name: Require deployment configuration
+        run: |
+          missing=""
+          for v in AWS_REGION AWS_DEPLOY_ROLE_ARN ECS_CLUSTER; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Deployment is not configured. Set these variables on the 'production' environment:$missing (see infra/aws/README.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve commit and check it is on main
+        id: commit
+        run: |
+          sha="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$sha" origin/main \
+            || { echo "::error::$sha is not on main; only reviewed commits are deployed."; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${sha::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Does the image already exist?
+        id: exists
+        env:
+          TAG: ${{ steps.commit.outputs.tag }}
+        run: |
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+               --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing image $ECR_REPOSITORY:$TAG"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.exists.outputs.found != 'true'
+
+      - uses: docker/build-push-action@v7
+        if: steps.exists.outputs.found != 'true'
+        with:
+          context: ${{ inputs.context }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ steps.commit.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.commit.outputs.sha }}
+          cache-from: type=gha,scope=${{ inputs.ecr_repository }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.ecr_repository }}
+
+      - name: Fetch live task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "${{ inputs.task_family }}" \
+            --query taskDefinition > task-definition.json
+
+      - uses: aws-actions/amazon-ecs-render-task-definition@v1
+        id: render
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ inputs.container_name }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ steps.commit.outputs.tag }}
+
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ inputs.ecs_service }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Summary
+        run: |
+          echo "Deployed \`${{ inputs.ecr_repository }}:${{ steps.commit.outputs.tag }}\` to \`${{ inputs.ecs_service }}\`." \
+            >> "$GITHUB_STEP_SUMMARY"

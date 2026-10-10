@@ -71,3 +71,21 @@ make run       # http://127.0.0.1:8080
 make smoke     # call /health, /ready, /v1/chat on the running service
 make check     # ruff + pytest
 ```
+
+## Container
+
+```sh
+make image       # docker build -t tatarbot-agent-runtime:local .
+make image-run   # with .env, published on 127.0.0.1:8080 only
+```
+
+The image runs `uvicorn --factory agent_runtime.main:create_app` as a non-root user and
+listens on `UVICORN_HOST:UVICORN_PORT` (default `0.0.0.0:8080`, so other containers can
+reach it). Its `HEALTHCHECK` calls `/health`, not `/ready`: `/ready` queries the model
+backend and must not become a periodic probe against a scale-to-zero endpoint. On SIGTERM,
+uvicorn stops accepting connections and finishes in-flight requests. Configuration and
+secrets come only from the environment. The image works with a read-only root filesystem.
+
+Integration tests against a mock OpenAI-compatible backend: `make integration` from the
+repository root. In ECS this runs as service `tatarbot-runtime`, reachable only from the bot
+at `http://runtime.tatarbot.internal:8080` (`infra/aws/`).

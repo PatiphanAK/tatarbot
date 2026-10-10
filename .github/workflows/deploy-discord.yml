@@ -1,0 +1,31 @@
+# Manual deploy of the Discord bot to ECS service tatarbot-discord.
+# Not triggered automatically until the AWS infrastructure exists (infra/aws).
+
+name: Deploy discord
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch on main to deploy
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-tatarbot-discord
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy-ecs.yml
+    with:
+      ref: ${{ inputs.ref }}
+      context: discord_bot
+      ecr_repository: tatarbot-discord
+      ecs_service: tatarbot-discord
+      task_family: tatarbot-discord
+      container_name: discord

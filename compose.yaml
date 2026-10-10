@@ -1,0 +1,47 @@
+# Local development: both services as separate containers on the default Compose network,
+# mirroring the two independent ECS services. The bot reaches the runtime by service name.
+# No port is published to the host.
+#
+#   docker compose up --build                 # whole stack
+#   docker compose up --build agent_runtime   # runtime only
+#
+# To run one service's container against something outside Compose, use
+# `make -C agent_runtime image-run` or `make -C discord_bot image-run` instead.
+#
+# Configuration comes from agent_runtime/.env and discord_bot/.env (`make -C <service> env`).
+# AGENT_API_KEY must be the same in both. `depends_on` only orders local startup; in ECS the
+# services start independently and the bot tolerates an unavailable runtime per message.
+
+services:
+  agent_runtime:
+    build: agent_runtime
+    image: tatarbot-agent-runtime:local
+    env_file:
+      - path: agent_runtime/.env
+        required: false
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: "8080"
+    # Lets MODEL_BASE_URL=http://host.docker.internal:8000/v1 reach a model on this machine.
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+  discord_bot:
+    build: discord_bot
+    image: tatarbot-discord:local
+    env_file:
+      - path: discord_bot/.env
+        required: false
+    environment:
+      AGENT_BASE_URL: http://agent_runtime:8080
+    depends_on:
+      agent_runtime:
+        condition: service_healthy
+    restart: unless-stopped
