@@ -1,21 +1,23 @@
 use std::sync::Arc;
 
 use serenity::all::{
-    Command, Context, CreateAllowedMentions, CreateMessage, EventHandler, Message, Ready, UserId,
+    Command, Context, CreateAllowedMentions, CreateMessage, EventHandler, Interaction, Message,
+    Ready, UserId,
 };
 use serenity::async_trait;
 
-use super::{convert, presenter};
-use crate::application::ports::ChatService;
+use super::{convert, music, presenter};
+use crate::application::ports::{ChatService, MusicService};
 use crate::domain::ChatRequest;
 
 pub struct Handler {
     chat: Arc<dyn ChatService>,
+    music: Arc<dyn MusicService>,
 }
 
 impl Handler {
-    pub fn new(chat: Arc<dyn ChatService>) -> Self {
-        Self { chat }
+    pub fn new(chat: Arc<dyn ChatService>, music: Arc<dyn MusicService>) -> Self {
+        Self { chat, music }
     }
 }
 
@@ -23,7 +25,15 @@ impl Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!(user = %ready.user.name, "connected to Discord");
-        remove_stale_slash_commands(&ctx, &ready).await;
+        register_slash_commands(&ctx, &ready, self.music.as_ref()).await;
+    }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::Command(cmd) = interaction
+            && music::is_music_command(&cmd.data.name)
+        {
+            music::handle(&ctx, &cmd, self.music.as_ref()).await;
+        }
     }
 
     /// Discord `MESSAGE_CREATE`. Serenity runs each event in its own task,
@@ -89,18 +99,14 @@ async fn respond(ctx: &Context, msg: &Message, bot_id: UserId, chat: &dyn ChatSe
     typing.stop();
 }
 
-/// Earlier versions registered `/chat`; delete it so users don't see a
-/// command that no longer works. No-op once cleaned up.
-async fn remove_stale_slash_commands(ctx: &Context, ready: &Ready) {
-    match Command::get_global_commands(&ctx.http).await {
-        Ok(cmds) if !cmds.is_empty() => {
-            match Command::set_global_commands(&ctx.http, Vec::new()).await {
-                Ok(_) => tracing::info!(count = cmds.len(), "removed global slash commands"),
-                Err(err) => tracing::warn!(%err, "failed to remove global slash commands"),
-            }
-        }
-        Ok(_) => {}
-        Err(err) => tracing::warn!(%err, "failed to list global slash commands"),
+/// Replaces the global commands with the music commands (bulk overwrite, so
+/// the old `/chat` disappears too), and removes guild-level leftovers from
+/// earlier versions so commands don't show up twice.
+async fn register_slash_commands(ctx: &Context, ready: &Ready, music: &dyn MusicService) {
+    let commands = music::commands(music.stations());
+    match Command::set_global_commands(&ctx.http, commands).await {
+        Ok(registered) => tracing::info!(count = registered.len(), "registered slash commands"),
+        Err(err) => tracing::warn!(%err, "failed to register slash commands"),
     }
     for guild in &ready.guilds {
         if let Ok(cmds) = guild.id.get_commands(&ctx.http).await

@@ -4,12 +4,23 @@ use std::time::Duration;
 
 use reqwest::Url;
 
+use crate::domain::music::StationList;
 use crate::error::AppError;
+
+const DEFAULT_STATIONS: &str = include_str!("../stations.toml");
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub discord: DiscordConfig,
     pub agent: AgentConfig,
+    pub music: MusicConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct MusicConfig {
+    pub stations: StationList,
+    /// Tracks per guild, including the one playing.
+    pub max_queue: usize,
 }
 
 #[derive(Clone)]
@@ -43,7 +54,29 @@ impl Config {
             .transpose()?
             .unwrap_or(120);
 
+        let stations_text = match optional("MUSIC_STATIONS_FILE") {
+            Some(path) => std::fs::read_to_string(&path)
+                .map_err(|e| invalid("MUSIC_STATIONS_FILE", &format!("{path}: {e}")))?,
+            None => DEFAULT_STATIONS.to_owned(),
+        };
+        let stations = StationList::from_toml(&stations_text)
+            .map_err(|e| invalid("MUSIC_STATIONS_FILE", &e.to_string()))?;
+        let max_queue = optional("MUSIC_MAX_QUEUE")
+            .map(|v| match v.parse::<usize>() {
+                Ok(n @ 1..=500) => Ok(n),
+                _ => Err(invalid(
+                    "MUSIC_MAX_QUEUE",
+                    "must be an integer from 1 to 500",
+                )),
+            })
+            .transpose()?
+            .unwrap_or(50);
+
         Ok(Self {
+            music: MusicConfig {
+                stations,
+                max_queue,
+            },
             discord: DiscordConfig { token },
             agent: AgentConfig {
                 base_url,

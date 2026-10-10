@@ -1,0 +1,31 @@
+# Curated radio stations for /radio (and, later, chat control). Embedded in the binary;
+# override with MUSIC_STATIONS_FILE=/path/to/stations.toml.
+#
+# 1-25 stations; `name` is what users type (a-z, 0-9, -). Streams must be http(s).
+# SomaFM is listener-supported: check its terms before rebroadcasting it in a public
+# server, and consider supporting it (https://somafm.com/support/).
+
+[[station]]
+name = "lofi"
+title = "SomaFM Fluid: instrumental hip-hop and lo-fi beats"
+url = "https://ice2.somafm.com/fluid-128-mp3"
+
+[[station]]
+name = "jazz"
+title = "SomaFM Sonic Universe: modern jazz"
+url = "https://ice2.somafm.com/sonicuniverse-128-mp3"
+
+[[station]]
+name = "chill"
+title = "SomaFM Groove Salad: ambient and downtempo"
+url = "https://ice2.somafm.com/groovesalad-128-mp3"
+
+[[station]]
+name = "ambient"
+title = "SomaFM Drone Zone: atmospheric ambient"
+url = "https://ice2.somafm.com/dronezone-128-mp3"
+
+[[station]]
+name = "lounge"
+title = "SomaFM Secret Agent: spy lounge"
+url = "https://ice2.somafm.com/secretagent-128-mp3"
