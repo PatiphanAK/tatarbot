@@ -77,12 +77,20 @@ resource "aws_ecs_task_definition" "runtime" {
           MODEL_BASE_URL        = var.model_base_url
           MODEL_NAME            = var.model_name
           MODEL_TIMEOUT_SECONDS = tostring(var.model_timeout_seconds)
+          # Whole turn incl. web searches; leaves the bot time to report a timeout.
+          TURN_TIMEOUT_SECONDS = tostring(var.agent_timeout_secs - 10)
         }) : { name = k, value = v }
       ]
-      secrets = [
-        { name = "AGENT_API_KEY", valueFrom = local.secret_arns.agent_api_key },
-        { name = "MODEL_API_KEY", valueFrom = local.secret_arns.model_api_key },
-      ]
+      secrets = concat(
+        [
+          { name = "AGENT_API_KEY", valueFrom = local.secret_arns.agent_api_key },
+          { name = "MODEL_API_KEY", valueFrom = local.secret_arns.model_api_key },
+        ],
+        # The runtime enables web search only when this key is set.
+        var.web_search_enabled ? [
+          { name = "TAVILY_API_KEY", valueFrom = local.secret_arns.tavily_api_key },
+        ] : [],
+      )
       # Liveness only (/health). /ready calls the inference backend and could wake or bill
       # a scale-to-zero endpoint on every probe.
       healthCheck = {

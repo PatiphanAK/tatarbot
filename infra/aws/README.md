@@ -98,6 +98,8 @@ terraform apply                                # services start with desired cou
    aws ssm put-parameter --type SecureString --name /tatarbot/discord/DISCORD_TOKEN --value "$DISCORD_TOKEN"
    aws ssm put-parameter --type SecureString --name /tatarbot/shared/AGENT_API_KEY  --value "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
    aws ssm put-parameter --type SecureString --name /tatarbot/runtime/MODEL_API_KEY --value "$MODEL_API_KEY"
+   # Web search (skip, and set web_search_enabled = false, to run without it)
+   aws ssm put-parameter --type SecureString --name /tatarbot/runtime/TAVILY_API_KEY --value "$TAVILY_API_KEY"
    ```
 
 2. **Configure GitHub**: create the `production` environment (add required reviewers) and set

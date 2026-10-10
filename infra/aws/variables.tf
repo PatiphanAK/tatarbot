@@ -100,6 +100,12 @@ variable "agent_timeout_secs" {
   default     = 120
 }
 
+variable "web_search_enabled" {
+  description = "Give the runtime TAVILY_API_KEY from SSM (the parameter must exist), enabling web search."
+  type        = bool
+  default     = true
+}
+
 variable "runtime_extra_environment" {
   description = "Further non-secret runtime settings, e.g. { MODEL_ENABLE_THINKING = \"false\" }."
   type        = map(string)
