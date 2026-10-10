@@ -6,6 +6,7 @@ mod config;
 mod domain;
 mod error;
 mod library;
+mod tls;
 
 use std::sync::Arc;
 
@@ -29,6 +30,9 @@ async fn main() -> Result<(), AppError> {
                 .unwrap_or_else(|_| EnvFilter::new("info,serenity=warn")),
         )
         .init();
+
+    // Before anything opens a TLS connection (see tls.rs).
+    tls::install_crypto_provider()?;
 
     let config = Config::from_env()?;
 

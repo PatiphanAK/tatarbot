@@ -47,6 +47,7 @@ impl TrackResolver for UrlTrackResolver {
                 // Unknown until it plays; a direct link is assumed to end.
                 live: false,
                 requested_by,
+                now_playing: None,
             },
             source: TrackSource::Http(url),
         })

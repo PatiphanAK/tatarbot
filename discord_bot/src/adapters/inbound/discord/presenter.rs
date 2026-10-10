@@ -59,6 +59,11 @@ pub fn split_message(text: &str) -> Vec<String> {
 
 // ---- Music
 
+/// A command handler crashed; details are in the logs, never in Discord.
+pub fn command_failed() -> String {
+    GENERIC_FAILURE.into()
+}
+
 pub const MUSIC_GUILD_ONLY: &str = "🎵 Music commands work in servers only.";
 pub const MUSIC_STOPPED: &str = "⏹️ Stopped and cleared the queue.";
 pub const MUSIC_LEFT: &str = "👋 Left the voice channel.";
@@ -236,8 +241,13 @@ fn megabytes(bytes: u64) -> String {
 
 fn describe(track: &TrackInfo) -> String {
     let live = if track.live { " 🔴 LIVE" } else { "" };
+    let now = track
+        .now_playing
+        .as_deref()
+        .map(|title| format!(" · ♪ {}", escape(title)))
+        .unwrap_or_default();
     format!(
-        "**{}**{live} · requested by <@{}>",
+        "**{}**{live}{now} · requested by <@{}>",
         escape(&track.title),
         track.requested_by.0
     )
@@ -315,6 +325,7 @@ mod tests {
             title: title.into(),
             live,
             requested_by: crate::domain::music::UserId(42),
+            now_playing: None,
         }
     }
 
@@ -332,6 +343,16 @@ mod tests {
             "➕ Queued #2: **a.mp3** · requested by <@42>"
         );
         assert_eq!(skipped(None), "⏭️ Skipped. The queue is empty.");
+    }
+
+    #[test]
+    fn live_tracks_show_what_is_playing() {
+        let mut lofi = track("Lofi", true);
+        lofi.now_playing = Some("Sango - Never*Ending".into());
+        assert_eq!(
+            queue(&[lofi]),
+            r"▶️ **Lofi** 🔴 LIVE · ♪ Sango - Never\*Ending · requested by <@42>"
+        );
     }
 
     #[test]

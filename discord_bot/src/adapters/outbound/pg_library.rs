@@ -36,6 +36,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// After this long unreachable, log a hint about paused Supabase projects.
 const PAUSE_HINT_AFTER: Duration = Duration::from_secs(10 * 60);
 
+/// Minimum pg_trgm score for a fuzzy match (pg_trgm's own default).
+const SIMILARITY_THRESHOLD: f32 = 0.3;
+
 /// Key space for guild-level advisory locks (two-int form; never overlaps
 /// with the single-bigint hash locks).
 const GUILD_LOCK_SPACE: i32 = 1;
@@ -105,6 +108,7 @@ impl PgLibrary {
                 match sqlx::migrate!("./migrations").run(&self.pool).await {
                     Ok(()) => {
                         tracing::info!("library database connected");
+                        self.log_thai_search_support().await;
                         self.available.store(true, Ordering::SeqCst);
                         backoff = Duration::from_secs(1);
                         hinted = false;
@@ -149,6 +153,22 @@ impl PgLibrary {
                     down_since = tokio::time::Instant::now();
                 }
             }
+        }
+    }
+
+    /// Whether this database's locale gives Thai trigrams (typo-tolerant Thai
+    /// search) or only substring matching. Logged once per connect.
+    async fn log_thai_search_support(&self) {
+        let fuzzy = sqlx::query_scalar!(r#"SELECT show_trgm('เพลง') <> '{}' AS "fuzzy!""#)
+            .fetch_one(&self.pool)
+            .await;
+        match fuzzy {
+            Ok(true) => tracing::info!("title search: fuzzy for Latin and Thai"),
+            Ok(false) => tracing::info!(
+                "title search: fuzzy for Latin; Thai by substring only (database LC_CTYPE \
+                 gives no Thai trigrams)"
+            ),
+            Err(err) => tracing::warn!(%err, "could not check pg_trgm support"),
         }
     }
 
@@ -433,26 +453,46 @@ impl LibraryRepository for PgLibrary {
         limit: usize,
     ) -> Result<Vec<LibraryTrack>, RepoError> {
         self.ensure_available()?;
-        let escaped = escape_like(query.trim());
-        // Exact match first, then prefix matches, then shorter titles.
+        let started = std::time::Instant::now();
+        let query = query.trim().to_lowercase();
+        let escaped = escape_like(&query);
+        // Candidates: substring (any locale, so Thai always works) or trigram
+        // similarity (typos, word order). Ranked exact > prefix > substring >
+        // trigram score, then shorter titles.
         let rows = sqlx::query_as!(
             Row,
             r"SELECT * FROM library_tracks
-              WHERE guild_id = $1 AND title ILIKE $2 ESCAPE '\'
-              ORDER BY lower(title) = lower($3) DESC,
-                       title ILIKE $4 ESCAPE '\' DESC,
+              WHERE guild_id = $1
+                AND (lower(title) LIKE $2 ESCAPE '\'
+                     OR word_similarity($3, lower(title)) >= $5
+                     OR similarity($3, lower(title)) >= $5)
+              ORDER BY CASE WHEN lower(title) = $3 THEN 0
+                            WHEN lower(title) LIKE $4 ESCAPE '\' THEN 1
+                            WHEN lower(title) LIKE $2 ESCAPE '\' THEN 2
+                            ELSE 3 END,
+                       greatest(word_similarity($3, lower(title)),
+                                similarity($3, lower(title))) DESC,
                        char_length(title),
                        id DESC
-              LIMIT $5",
+              LIMIT $6",
             guild.0 as i64,
             format!("%{escaped}%"),
-            query.trim(),
+            query,
             format!("{escaped}%"),
+            SIMILARITY_THRESHOLD,
             limit as i64
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| self.fail(e))?;
+        tracing::debug!(
+            target: "tatarbot::timing",
+            guild = guild.0,
+            chars = query.chars().count(),
+            rows = rows.len(),
+            search_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "library search"
+        );
         rows.into_iter().map(LibraryTrack::try_from).collect()
     }
 
@@ -1004,6 +1044,116 @@ mod tests {
                 4
             )
         );
+    }
+
+    async fn library_with(repo: &PgLibrary, titles: &[&str]) {
+        let store = FakeStore::default();
+        for (n, title) in titles.iter().enumerate() {
+            let mut t = new_track(1, &hash(100 + n as u8), Some(audio(10)));
+            t.title = (*title).into();
+            added(add(repo, &store, t).await);
+        }
+    }
+
+    async fn titles_for(repo: &PgLibrary, query: &str) -> Vec<String> {
+        let tracks = repo.search(GuildId(1), query, 10).await.unwrap();
+        tracks.into_iter().map(|t| t.title).collect()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs DATABASE_URL (make test-db)"]
+    async fn pg_search_is_typo_tolerant_and_ranked(pool: PgPool) {
+        let repo = PgLibrary::from_pool(pool, true);
+        library_with(
+            &repo,
+            &[
+                "Sango - Never-Ending",
+                "Never Gonna Give You Up",
+                "Ending Theme",
+                "Lofi Rain",
+            ],
+        )
+        .await;
+
+        // Typos and partial words, best first.
+        assert_eq!(
+            titles_for(&repo, "nevr endng").await[0],
+            "Sango - Never-Ending"
+        );
+        assert_eq!(
+            titles_for(&repo, "never gona").await[0],
+            "Never Gonna Give You Up"
+        );
+        // Exact > prefix > substring > fuzzy.
+        assert_eq!(
+            titles_for(&repo, "ending").await[..2],
+            ["Ending Theme", "Sango - Never-Ending"]
+        );
+        assert!(titles_for(&repo, "jazz quartet").await.is_empty());
+        // Other servers' tracks never match.
+        assert!(
+            repo.search(GuildId(2), "lofi", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs DATABASE_URL (make test-db)"]
+    async fn pg_search_finds_thai(pool: PgPool) {
+        let repo = PgLibrary::from_pool(pool, true);
+        library_with(&repo, &["เพลงรักวันฝนตก", "ลูกทุ่ง มันส์ๆ", "Thai Lofi เพลงชิล"]).await;
+
+        // Substrings: Thai has no spaces between words.
+        assert_eq!(titles_for(&repo, "รักวัน").await, ["เพลงรักวันฝนตก"]);
+        // Also fuzzy-matches other titles sharing "เพลง" (song); the substring
+        // match ranks first, and unrelated titles don't match at all.
+        let chill = titles_for(&repo, "เพลงชิล").await;
+        assert_eq!(chill[0], "Thai Lofi เพลงชิล");
+        assert!(!chill.contains(&"ลูกทุ่ง มันส์ๆ".to_owned()), "{chill:?}");
+        // A dropped vowel mark: fuzzy, when the locale gives Thai trigrams (it
+        // does in en_US.UTF-8; see pg_search_c_locale_falls_back_to_substrings).
+        assert_eq!(titles_for(&repo, "เพลงรกวนฝนตก").await[0], "เพลงรักวันฝนตก");
+    }
+
+    /// Under LC_CTYPE "C" (possible on hosted Postgres) Thai has no trigrams:
+    /// substring search must still work, and fuzzy Thai simply doesn't match.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs DATABASE_URL (make test-db)"]
+    async fn pg_search_c_locale_falls_back_to_substrings(pool: PgPool) {
+        // Only digits are interpolated into the SQL below.
+        let name = format!("tatarbot_c_locale_{}", std::process::id());
+        let sql = |text: String| sqlx::AssertSqlSafe(text);
+        sqlx::query(sql(format!("DROP DATABASE IF EXISTS {name}")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(sql(format!(
+            "CREATE DATABASE {name} TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let base = url.rsplit_once('/').unwrap().0;
+        let c_pool = PgPool::connect(&format!("{base}/{name}")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&c_pool).await.unwrap();
+        let repo = PgLibrary::from_pool(c_pool.clone(), true);
+        library_with(&repo, &["เพลงรักวันฝนตก", "Sango - Never-Ending"]).await;
+
+        assert_eq!(titles_for(&repo, "รักวัน").await, ["เพลงรักวันฝนตก"]);
+        assert!(titles_for(&repo, "เพลงรกวนฝนตก").await.is_empty());
+        assert_eq!(
+            titles_for(&repo, "nevr endng").await,
+            ["Sango - Never-Ending"]
+        );
+
+        c_pool.close().await;
+        sqlx::query(sql(format!("DROP DATABASE {name}")))
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[sqlx::test(migrations = "./migrations")]

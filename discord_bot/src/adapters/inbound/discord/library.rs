@@ -4,17 +4,18 @@
 //! `LibraryService`.
 
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context, CreateAllowedMentions,
-    CreateAutocompleteResponse, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse, InteractionContext, ResolvedValue,
+    CommandInteraction, CommandOptionType, Context, CreateAutocompleteResponse, CreateCommand,
+    CreateCommandOption, CreateInteractionResponse, InteractionContext, ResolvedValue,
 };
 
-use super::presenter;
-use crate::application::ports::{Attachment, LibraryService, UploadRequest};
+use super::{presenter, respond};
+use crate::application::ports::{Attachment, LibraryError, LibraryService, UploadRequest};
 use crate::domain::library::{LibraryTrackId, MAX_TITLE_CHARS};
 use crate::domain::music::{GuildId, UserId};
 
 const AUTOCOMPLETE_CHOICES: usize = 25;
+/// Leaves ~1 s of Discord's 3 s for the round trip.
+const AUTOCOMPLETE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub fn commands() -> Vec<CreateCommand> {
     let guild_only = || vec![InteractionContext::Guild];
@@ -87,15 +88,23 @@ pub async fn handle(
     library: &dyn LibraryService,
     upload_role: &str,
 ) {
+    // First: downloads, transcodes and database calls can exceed Discord's 3 s.
+    let Some(reply) = respond::defer(ctx, cmd).await else {
+        return;
+    };
     let Some(guild_id) = cmd.guild_id else {
-        reply(ctx, cmd, presenter::MUSIC_GUILD_ONLY.into(), true).await;
+        reply.refuse(presenter::MUSIC_GUILD_ONLY.into()).await;
         return;
     };
     let guild = GuildId(guild_id.get());
     let user = UserId(cmd.user.id.get());
     let manager = can_manage(ctx, cmd, upload_role);
+    let refused = |err: LibraryError| {
+        tracing::info!(command = %cmd.data.name, error = %err, "library command refused");
+        presenter::library_error(&err)
+    };
 
-    match cmd.data.name.as_str() {
+    let result = match cmd.data.name.as_str() {
         "upload" => {
             let mut attachment = None;
             let mut title = None;
@@ -112,35 +121,19 @@ pub async fn handle(
                     _ => {}
                 }
             }
-            let Some(attachment) = attachment else {
-                return;
-            };
-            // Download, probe and transcode take longer than Discord's 3 s.
-            if let Err(err) = cmd.defer(&ctx.http).await {
-                tracing::warn!(%err, "failed to defer interaction");
-                return;
-            }
-            let result = library
-                .upload(UploadRequest {
-                    guild,
-                    user,
-                    can_upload: manager,
-                    attachment,
-                    title,
-                })
-                .await;
-            let text = match result {
-                Ok(outcome) => presenter::uploaded(&outcome),
-                Err(err) => {
-                    tracing::info!(error = %err, "upload refused");
-                    presenter::library_error(&err)
-                }
-            };
-            let edit = EditInteractionResponse::new()
-                .content(text)
-                .allowed_mentions(CreateAllowedMentions::new());
-            if let Err(err) = cmd.edit_response(&ctx.http, edit).await {
-                tracing::warn!(%err, "failed to send upload reply");
+            match attachment {
+                None => Err(presenter::library_error(&LibraryError::NotAudio)),
+                Some(attachment) => library
+                    .upload(UploadRequest {
+                        guild,
+                        user,
+                        can_upload: manager,
+                        attachment,
+                        title,
+                    })
+                    .await
+                    .map(|outcome| presenter::uploaded(&outcome))
+                    .map_err(refused),
             }
         }
         "library" => {
@@ -153,49 +146,61 @@ pub async fn handle(
                     _ => None,
                 })
                 .unwrap_or(1);
-            match library.list(guild, page).await {
-                Ok(page) => reply(ctx, cmd, presenter::library_page(&page), false).await,
-                Err(err) => reply(ctx, cmd, presenter::library_error(&err), true).await,
-            }
+            library
+                .list(guild, page)
+                .await
+                .map(|page| presenter::library_page(&page))
+                .map_err(refused)
         }
         "delete" => {
             let id = cmd.data.options().into_iter().find_map(|o| match o.value {
                 ResolvedValue::String(s) => s.trim().parse::<i64>().ok(),
                 _ => None,
             });
-            let Some(id) = id else {
-                let text =
-                    presenter::library_error(&crate::application::ports::LibraryError::NotFound);
-                reply(ctx, cmd, format!("{text} Pick one from the list."), true).await;
-                return;
-            };
-            match library
-                .delete(guild, user, manager, LibraryTrackId(id))
-                .await
-            {
-                Ok(track) => reply(ctx, cmd, presenter::deleted(&track), false).await,
-                Err(err) => reply(ctx, cmd, presenter::library_error(&err), true).await,
+            match id {
+                None => Err(format!(
+                    "{} Pick one from the list.",
+                    presenter::library_error(&LibraryError::NotFound)
+                )),
+                Some(id) => library
+                    .delete(guild, user, manager, LibraryTrackId(id))
+                    .await
+                    .map(|track| presenter::deleted(&track))
+                    .map_err(refused),
             }
         }
-        other => tracing::warn!(command = other, "unknown library command"),
-    }
+        other => {
+            tracing::warn!(command = other, "unknown library command");
+            return;
+        }
+    };
+    reply.result(result).await;
 }
 
 /// Title suggestions for `/play query` (value: the title) and `/delete track`
 /// (value: the track id). An unavailable library suggests nothing.
 pub async fn autocomplete(ctx: &Context, cmd: &CommandInteraction, library: &dyn LibraryService) {
     let (Some(guild_id), Some(focused)) = (cmd.guild_id, cmd.data.autocomplete()) else {
+        no_suggestions(ctx, cmd).await;
         return;
     };
+    let received = std::time::Instant::now();
     let by_id = cmd.data.name == "delete";
     let typed = focused.value;
     let tracks = if !by_id && typed.contains("://") {
         Vec::new() // a link: nothing to suggest
     } else {
-        library
-            .search(GuildId(guild_id.get()), typed, AUTOCOMPLETE_CHOICES)
-            .await
-            .unwrap_or_default()
+        // Autocomplete can't be deferred: answer within Discord's 3 s or not
+        // at all. A slow database means no suggestions, not an error.
+        let search = library.search(GuildId(guild_id.get()), typed, AUTOCOMPLETE_CHOICES);
+        match tokio::time::timeout(AUTOCOMPLETE_BUDGET, search).await {
+            Ok(Ok(tracks)) => tracks,
+            Ok(Err(_)) => Vec::new(),
+            Err(_) => {
+                tracing::warn!(budget = ?AUTOCOMPLETE_BUDGET, "autocomplete search too slow");
+                Vec::new()
+            }
+        }
     };
     let response = tracks
         .iter()
@@ -207,23 +212,28 @@ pub async fn autocomplete(ctx: &Context, cmd: &CommandInteraction, library: &dyn
             };
             r.add_string_choice(presenter::library_choice(track), value)
         });
-    if let Err(err) = cmd
+    let sent = cmd
         .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(response))
-        .await
-    {
+        .await;
+    tracing::debug!(
+        target: "tatarbot::timing",
+        command = %cmd.data.name,
+        chars = typed.chars().count(),
+        choices = tracks.len(),
+        ok = sent.is_ok(),
+        discord_to_bot_ms = super::music::since_created_ms(cmd),
+        replied_ms = received.elapsed().as_millis() as u64,
+        "autocomplete"
+    );
+    if let Err(err) = sent {
         tracing::debug!(%err, "autocomplete reply failed");
     }
 }
 
-async fn reply(ctx: &Context, cmd: &CommandInteraction, text: String, ephemeral: bool) {
-    let message = CreateInteractionResponseMessage::new()
-        .content(text)
-        .ephemeral(ephemeral)
-        .allowed_mentions(CreateAllowedMentions::new());
-    if let Err(err) = cmd
-        .create_response(&ctx.http, CreateInteractionResponse::Message(message))
-        .await
-    {
-        tracing::warn!(%err, "failed to send library reply");
+/// An empty answer, so Discord shows "no options" instead of an error.
+pub async fn no_suggestions(ctx: &Context, cmd: &CommandInteraction) {
+    let empty = CreateInteractionResponse::Autocomplete(CreateAutocompleteResponse::new());
+    if let Err(err) = cmd.create_response(&ctx.http, empty).await {
+        tracing::debug!(%err, "autocomplete reply failed");
     }
 }

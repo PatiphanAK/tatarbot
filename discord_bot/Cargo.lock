@@ -4662,9 +4662,11 @@ dependencies = [
  "aws-sdk-s3",
  "bytes",
  "chrono",
+ "futures",
  "libc",
  "reqwest 0.12.28",
  "reqwest 0.13.5",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "serenity",
@@ -4675,10 +4677,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
