@@ -347,11 +347,14 @@ workflows have not yet run on GitHub.
 
 ### Phase 2: Runpod endpoint (paid, small, capped)
 
+Files are in `model-inference/` (prepared; the endpoint has not been created):
+
 | File | Change |
 |---|---|
-| `models/serving/runpod/endpoint.env.example` | Non-secret worker env template (model id, served name, `MAX_MODEL_LEN`, quantization) |
-| `models/serving/runpod/README.md` | Manual endpoint creation steps, scaling limits, how to measure cold start |
-| `scripts/smoke_inference.sh` (or a Make target) | Calls the endpoint directly: `GET /models`, one `POST /chat/completions` with the exact body the runtime sends |
+| `model-inference/runpod/endpoint.env.example` | Non-secret worker env template (model id, served name `tatarbot-chat`, `MAX_MODEL_LEN`, quantization) |
+| `model-inference/README.md` | Manual endpoint creation steps, scaling limits, how to measure cold start |
+| `model-inference/scripts/smoke.py` (`make -C model-inference smoke`) | Calls the endpoint directly with the exact body the runtime sends (cold and warm, timed), then `GET /models` and an unauthenticated request |
+| `model-inference/local/compose.yaml` | Local vLLM on a developer GPU with the same served name and auth, replacing the tunnel for development |
 
 Acceptance:
 - Direct smoke: `/chat/completions` returns 200 with a non-empty `choices[0].message.content`
