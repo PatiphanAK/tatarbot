@@ -6,7 +6,11 @@ use serenity::all::{
 };
 use serenity::async_trait;
 
-use super::{convert, library, music, presenter};
+use std::panic::AssertUnwindSafe;
+
+use futures::FutureExt;
+
+use super::{convert, library, music, presenter, respond};
 use crate::application::ports::{ChatService, LibraryService, MusicService};
 use crate::domain::ChatRequest;
 
@@ -43,25 +47,6 @@ impl EventHandler for Handler {
         register_slash_commands(&ctx, &ready, self.music.as_ref(), self.library.is_some()).await;
     }
 
-    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        match interaction {
-            Interaction::Command(cmd) if music::is_music_command(&cmd.data.name) => {
-                music::handle(&ctx, &cmd, self.music.as_ref()).await;
-            }
-            Interaction::Command(cmd) if library::is_library_command(&cmd.data.name) => {
-                if let Some(lib) = &self.library {
-                    library::handle(&ctx, &cmd, lib.service.as_ref(), &lib.upload_role).await;
-                }
-            }
-            Interaction::Autocomplete(cmd) => {
-                if let Some(lib) = &self.library {
-                    library::autocomplete(&ctx, &cmd, lib.service.as_ref()).await;
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Discord `MESSAGE_CREATE`. Serenity runs each event in its own task,
     /// so a slow agent call doesn't block other messages.
     async fn message(&self, ctx: Context, msg: Message) {
@@ -71,6 +56,54 @@ impl EventHandler for Handler {
         }
         respond(&ctx, &msg, bot_id, self.chat.as_ref()).await;
     }
+
+    /// A panic in a command must not leave the caller with "TatarBot is
+    /// thinking…" forever: catch it, log it, and reply with an error.
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let handled = AssertUnwindSafe(self.dispatch(&ctx, &interaction))
+            .catch_unwind()
+            .await;
+        if let Err(panic) = handled {
+            let reason = panic_reason(panic.as_ref());
+            if let Interaction::Command(cmd) = &interaction {
+                tracing::error!(command = %cmd.data.name, %reason, "command handler panicked");
+                respond::report_panic(&ctx, cmd).await;
+            } else {
+                tracing::error!(%reason, "interaction handler panicked");
+            }
+        }
+    }
+}
+
+impl Handler {
+    async fn dispatch(&self, ctx: &Context, interaction: &Interaction) {
+        match interaction {
+            Interaction::Command(cmd) if music::is_music_command(&cmd.data.name) => {
+                music::handle(ctx, cmd, self.music.as_ref()).await;
+            }
+            Interaction::Command(cmd) if library::is_library_command(&cmd.data.name) => {
+                if let Some(lib) = &self.library {
+                    library::handle(ctx, cmd, lib.service.as_ref(), &lib.upload_role).await;
+                }
+            }
+            // Always answer: an unanswered autocomplete shows "Loading options
+            // failed" (e.g. a /play registered with suggestions by a bot that
+            // has the library, while this one doesn't).
+            Interaction::Autocomplete(cmd) => match &self.library {
+                Some(lib) => library::autocomplete(ctx, cmd, lib.service.as_ref()).await,
+                None => library::no_suggestions(ctx, cmd).await,
+            },
+            _ => {}
+        }
+    }
+}
+
+fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_owned())
 }
 
 /// Respond only to humans who @mention the bot or reply to one of its
@@ -162,6 +195,17 @@ mod tests {
 
     const BOT: UserId = UserId::new(1);
     const OTHER: UserId = UserId::new(2);
+
+    #[tokio::test]
+    async fn panics_are_caught_with_their_message() {
+        let caught = AssertUnwindSafe(async { panic!("boom {}", 42) })
+            .catch_unwind()
+            .await
+            .unwrap_err();
+        assert_eq!(panic_reason(caught.as_ref()), "boom 42");
+        let caught = std::panic::catch_unwind(|| std::panic::panic_any(7u8)).unwrap_err();
+        assert_eq!(panic_reason(caught.as_ref()), "unknown panic");
+    }
 
     #[test]
     fn responds_to_mentions() {

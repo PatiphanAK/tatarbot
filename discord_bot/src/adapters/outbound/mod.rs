@@ -2,6 +2,7 @@ pub mod agent_http;
 pub mod attachment_fetch;
 pub mod audio_http;
 pub mod ffmpeg;
+pub mod icy;
 pub mod library_resolver;
 pub mod pg_library;
 pub mod s3_store;

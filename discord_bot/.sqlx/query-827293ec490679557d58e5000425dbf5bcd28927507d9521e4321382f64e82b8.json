@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT show_trgm('เพลง') <> '{}' AS \"fuzzy!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fuzzy!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "827293ec490679557d58e5000425dbf5bcd28927507d9521e4321382f64e82b8"
+}

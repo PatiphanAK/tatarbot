@@ -9,6 +9,7 @@ mod handler;
 mod library;
 mod music;
 mod presenter;
+mod respond;
 
 pub use handler::LibraryCommands;
 
@@ -34,15 +35,7 @@ pub async fn run(
     library: Option<LibraryCommands>,
     voice: Arc<Songbird>,
 ) -> Result<(), AppError> {
-    // MESSAGE_CONTENT (privileged) is required to read replies to the bot
-    // that don't ping it; enable it under Bot -> Privileged Gateway Intents.
-    // GUILDS + GUILD_VOICE_STATES (not privileged) let the cache know which
-    // voice channel a user is in, and drive Songbird's connections.
-    let intents = GatewayIntents::GUILDS
-        | GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT
-        | GatewayIntents::GUILD_VOICE_STATES;
+    let intents = intents();
 
     let mut client = Client::builder(&config.token, intents)
         .event_handler(handler::Handler::new(chat, music, library))
@@ -97,6 +90,18 @@ pub async fn run(
     Ok(())
 }
 
+/// MESSAGE_CONTENT (privileged) is required to read replies to the bot that
+/// don't ping it; enable it under Bot -> Privileged Gateway Intents.
+/// GUILDS + GUILD_VOICE_STATES (not privileged) fill the cache with guilds and
+/// their voice states (which channel each user is in) and drive Songbird.
+fn intents() -> GatewayIntents {
+    GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_VOICE_STATES
+}
+
 /// With a voice manager registered, `Client::start` first fetches the bot
 /// user and fails outright if Discord is unreachable. Do that fetch here with
 /// backoff, so a short outage at startup doesn't crash-loop the task; a
@@ -146,4 +151,18 @@ async fn shutdown_signal() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without these, `/play` and `/radio` can't see the caller's voice channel.
+    #[test]
+    fn intents_cover_voice_states() {
+        let intents = intents();
+        assert!(intents.contains(GatewayIntents::GUILDS));
+        assert!(intents.contains(GatewayIntents::GUILD_VOICE_STATES));
+        assert!(intents.contains(GatewayIntents::MESSAGE_CONTENT));
+    }
 }

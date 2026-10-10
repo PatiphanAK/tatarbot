@@ -135,6 +135,15 @@ the same behaviour:
   leave listeners in another channel mid-track.
 * `/skip`, `/stop` and `/leave` need you in the bot's channel.
 * A live station never ends, so anything queued behind it replaces it.
+* **Radio reconnect:** a station that ends or errors without `/skip`, `/stop` or `/leave` has
+  dropped. It is started again as a fresh track (new connection and decoder, a 1–2 s gap)
+  after 1, 2, 4, 8, 16 s, giving up after 5 failures in a row; a minute of good playback
+  resets the backoff (`songbird_voice.rs`). Splicing a reconnected byte stream into the
+  running decoder was rejected: MP3 frames would be cut and the bit reservoir broken, and
+  Songbird ends a track on any decode error. A stalled stream is cut after 30 s without data.
+* **Now playing:** stations are requested with `Icy-MetaData: 1`; the interleaved
+  metadata blocks are stripped before decoding and the `StreamTitle` is shown in `/queue`
+  (`icy.rs`).
 * Searching by title (`/play some song`) arrives with the server library (Phase 1.5); for
   now it explains that and suggests a link or `/radio`.
 * Results are public; refusals are only shown to you. Titles from links are
@@ -150,8 +159,9 @@ SomaFM streams to a descriptive User-Agent (the bot sends `TatarBot/<version> (+
 but not to generic clients. It is listener-supported; check its terms before using it in a
 public server, or point `MUSIC_STATIONS_FILE` at your own list.
 
-`cargo test -- --ignored stations_decode` checks that every default station opens and decodes
-through the real voice pipeline (needs internet).
+`cargo test -- --ignored stations_decode icy_live` checks that every default station opens
+and decodes as a live ICY stream through the real voice pipeline, and that a title arrives
+(needs internet).
 
 Audio is decoded by Symphonia (pure Rust) and encoded to Opus by libopus, linked statically:
 no ffmpeg, no YouTube. Each playing server costs some CPU for Opus encoding; the default
@@ -202,6 +212,15 @@ Each server gets its own library of uploaded audio. Enabled when `DATABASE_URL` 
   the quota. An hourly sweep deletes objects with no row that are older than 1 hour, and
   re-checks row count and age under the same lock. A crash between object write and commit
   leaves an orphan that the sweep removes later.
+* **Search** (`/play <title>` and autocomplete, `pg_library.rs`): a title is a candidate if it
+  contains the query (`LIKE` on the lowercased title, wildcards escaped) or is
+  trigram-similar (`pg_trgm` `word_similarity`/`similarity` ≥ 0.3, for typos and partial
+  words). Ranked exact > prefix > substring > trigram score, then shorter titles. Thai has
+  no spaces and uses combining marks; whether `pg_trgm` sees Thai characters depends on the
+  database's `LC_CTYPE`. Under `en_US.UTF-8` Thai typos match too; under `C` Thai yields no
+  trigrams and only substring matching works (tested both). The bot logs which applies on
+  connect. A GIN trigram index serves both. Autocomplete can't be deferred, so its search
+  is capped at 2 s (no suggestions rather than an error).
 * **Without the database** (e.g. a paused Supabase project) the bot starts and works: radio
   and links play, library commands answer "temporarily unavailable", and a supervisor
   reconnects with backoff (1 s up to 5 min), running migrations on connect. After 10 minutes

@@ -2,12 +2,13 @@
 //! voice channel in the cache, call `MusicService`, render the result.
 
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context, CreateAllowedMentions, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse, InteractionContext, ResolvedValue,
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    InteractionContext, ResolvedValue,
 };
 
-use super::presenter;
+use std::time::Instant;
+
+use super::{presenter, respond};
 use crate::application::ports::{MusicService, PlayContext};
 use crate::domain::music::{GuildId, StationList, UserId, VoiceChannelId};
 
@@ -75,69 +76,107 @@ pub fn is_music_command(name: &str) -> bool {
 }
 
 pub async fn handle(ctx: &Context, cmd: &CommandInteraction, music: &dyn MusicService) {
-    let Some(guild_id) = cmd.guild_id else {
-        reply(ctx, cmd, presenter::MUSIC_GUILD_ONLY.into(), true).await;
+    let received = Instant::now();
+    // First, before any voice, stream or lock work: Discord allows 3 s.
+    let Some(reply) = respond::defer(ctx, cmd).await else {
         return;
     };
-    // The cache guard is not Send: read the voice state before any await.
-    let user_channel = ctx.cache.guild(guild_id).and_then(|guild| {
-        guild
-            .voice_states
-            .get(&cmd.user.id)
-            .and_then(|state| state.channel_id)
-            .map(|channel| VoiceChannelId(channel.get()))
-    });
+    let defer_ms = received.elapsed().as_millis() as u64;
+    let Some(guild_id) = cmd.guild_id else {
+        reply.refuse(presenter::MUSIC_GUILD_ONLY.into()).await;
+        return;
+    };
     let play_ctx = PlayContext {
         guild: GuildId(guild_id.get()),
         user: UserId(cmd.user.id.get()),
-        user_channel,
+        user_channel: user_voice_channel(ctx, guild_id, cmd.user.id).await,
+    };
+    let refused = |err: crate::application::ports::MusicError| {
+        tracing::info!(command = %cmd.data.name, error = %err, "music command refused");
+        presenter::music_error(&err)
     };
 
-    match cmd.data.name.as_str() {
-        name @ ("play" | "radio") => {
-            let arg = string_option(cmd, if name == "play" { "query" } else { "station" });
-            // Opening a voice connection can exceed Discord's 3 s reply window.
-            if let Err(err) = cmd.defer(&ctx.http).await {
-                tracing::warn!(%err, "failed to defer interaction");
-                return;
-            }
-            let result = if name == "play" {
-                music.play(play_ctx, &arg).await
-            } else {
-                music.play_station(play_ctx, &arg).await
-            };
-            let text = match result {
-                Ok(outcome) => presenter::play_outcome(&outcome),
-                Err(err) => {
-                    tracing::info!(command = name, error = %err, "music command refused");
-                    presenter::music_error(&err)
-                }
-            };
-            let edit = EditInteractionResponse::new()
-                .content(text)
-                .allowed_mentions(CreateAllowedMentions::new());
-            if let Err(err) = cmd.edit_response(&ctx.http, edit).await {
-                tracing::warn!(%err, "failed to send music reply");
-            }
+    let result = match cmd.data.name.as_str() {
+        "play" => music
+            .play(play_ctx, &string_option(cmd, "query"))
+            .await
+            .map(|outcome| presenter::play_outcome(&outcome))
+            .map_err(refused),
+        "radio" => music
+            .play_station(play_ctx, &string_option(cmd, "station"))
+            .await
+            .map(|outcome| presenter::play_outcome(&outcome))
+            .map_err(refused),
+        "skip" => music
+            .skip(play_ctx)
+            .await
+            .map(|next| presenter::skipped(next.as_ref()))
+            .map_err(refused),
+        "stop" => music
+            .stop(play_ctx)
+            .await
+            .map(|()| presenter::MUSIC_STOPPED.into())
+            .map_err(refused),
+        "leave" => music
+            .leave(play_ctx)
+            .await
+            .map(|()| presenter::MUSIC_LEFT.into())
+            .map_err(refused),
+        "queue" => Ok(presenter::queue(&music.queue(play_ctx.guild).await)),
+        other => {
+            tracing::warn!(command = other, "unknown music command");
+            return;
         }
-        "skip" => match music.skip(play_ctx).await {
-            Ok(next) => reply(ctx, cmd, presenter::skipped(next.as_ref()), false).await,
-            Err(err) => reply(ctx, cmd, presenter::music_error(&err), true).await,
-        },
-        "stop" => match music.stop(play_ctx).await {
-            Ok(()) => reply(ctx, cmd, presenter::MUSIC_STOPPED.into(), false).await,
-            Err(err) => reply(ctx, cmd, presenter::music_error(&err), true).await,
-        },
-        "leave" => match music.leave(play_ctx).await {
-            Ok(()) => reply(ctx, cmd, presenter::MUSIC_LEFT.into(), false).await,
-            Err(err) => reply(ctx, cmd, presenter::music_error(&err), true).await,
-        },
-        "queue" => {
-            let queue = music.queue(play_ctx.guild).await;
-            reply(ctx, cmd, presenter::queue(&queue), false).await;
+    };
+    tracing::debug!(
+        target: "tatarbot::timing",
+        command = %cmd.data.name,
+        guild = guild_id.get(),
+        ok = result.is_ok(),
+        discord_to_bot_ms = since_created_ms(cmd),
+        defer_ms,
+        handled_ms = received.elapsed().as_millis() as u64,
+        "music command"
+    );
+    reply.result(result).await;
+}
+
+/// Discord's interaction id encodes its creation time: gateway delivery
+/// latency (assuming the local clock is NTP-synced).
+pub fn since_created_ms(cmd: &CommandInteraction) -> i64 {
+    let created = cmd.id.created_at().unix_timestamp() * 1000
+        + i64::from(cmd.id.created_at().nanosecond() / 1_000_000);
+    chrono::Utc::now().timestamp_millis() - created
+}
+
+/// The caller's voice channel. The gateway cache (GUILDS + GUILD_VOICE_STATES
+/// intents) normally has it; if it doesn't (e.g. the guild isn't cached yet),
+/// ask Discord directly instead of telling the user to join a channel they
+/// are already in.
+async fn user_voice_channel(
+    ctx: &Context,
+    guild_id: serenity::all::GuildId,
+    user_id: serenity::all::UserId,
+) -> Option<VoiceChannelId> {
+    // The cache guard is not Send: finish with it before awaiting.
+    let cached = ctx.cache.guild(guild_id).map(|guild| {
+        guild
+            .voice_states
+            .get(&user_id)
+            .and_then(|state| state.channel_id)
+    });
+    let channel = match cached {
+        Some(channel) => channel,
+        None => {
+            tracing::debug!(guild = %guild_id, "guild not cached; fetching voice state");
+            ctx.http
+                .get_user_voice_state(guild_id, user_id)
+                .await
+                .ok()
+                .and_then(|state| state.channel_id)
         }
-        other => tracing::warn!(command = other, "unknown music command"),
-    }
+    };
+    channel.map(|c| VoiceChannelId(c.get()))
 }
 
 fn string_option(cmd: &CommandInteraction, name: &str) -> String {
@@ -150,18 +189,4 @@ fn string_option(cmd: &CommandInteraction, name: &str) -> String {
             _ => None,
         })
         .unwrap_or_default()
-}
-
-/// Errors are ephemeral (only the caller sees them); results are public.
-async fn reply(ctx: &Context, cmd: &CommandInteraction, text: String, ephemeral: bool) {
-    let message = CreateInteractionResponseMessage::new()
-        .content(text)
-        .ephemeral(ephemeral)
-        .allowed_mentions(CreateAllowedMentions::new());
-    if let Err(err) = cmd
-        .create_response(&ctx.http, CreateInteractionResponse::Message(message))
-        .await
-    {
-        tracing::warn!(%err, "failed to send music reply");
-    }
 }

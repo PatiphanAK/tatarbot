@@ -131,6 +131,8 @@ pub struct TrackInfo {
     /// Live streams never end on their own.
     pub live: bool,
     pub requested_by: UserId,
+    /// What a live station is playing right now (its ICY `StreamTitle`).
+    pub now_playing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +152,7 @@ impl Track {
                 title: track.title.clone(),
                 live: false,
                 requested_by,
+                now_playing: None,
             },
             source: TrackSource::Library { key },
         }
@@ -161,6 +164,7 @@ impl Track {
                 title: station.title.clone(),
                 live: true,
                 requested_by,
+                now_playing: None,
             },
             source: TrackSource::Http(station.url.clone()),
         }

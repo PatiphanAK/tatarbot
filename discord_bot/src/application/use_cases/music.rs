@@ -272,6 +272,7 @@ mod tests {
                     title: url.path().trim_matches('/').to_owned(),
                     live: false,
                     requested_by,
+                    now_playing: None,
                 },
                 source: TrackSource::Http(url),
             })

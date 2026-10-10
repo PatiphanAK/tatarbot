@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT * FROM library_tracks\n              WHERE guild_id = $1 AND title ILIKE $2 ESCAPE '\\'\n              ORDER BY lower(title) = lower($3) DESC,\n                       title ILIKE $4 ESCAPE '\\' DESC,\n                       char_length(title),\n                       id DESC\n              LIMIT $5",
+  "query": "SELECT * FROM library_tracks\n              WHERE guild_id = $1\n                AND (lower(title) LIKE $2 ESCAPE '\\'\n                     OR word_similarity($3, lower(title)) >= $5\n                     OR similarity($3, lower(title)) >= $5)\n              ORDER BY CASE WHEN lower(title) = $3 THEN 0\n                            WHEN lower(title) LIKE $4 ESCAPE '\\' THEN 1\n                            WHEN lower(title) LIKE $2 ESCAPE '\\' THEN 2\n                            ELSE 3 END,\n                       greatest(word_similarity($3, lower(title)),\n                                similarity($3, lower(title))) DESC,\n                       char_length(title),\n                       id DESC\n              LIMIT $6",
   "describe": {
     "columns": [
       {
@@ -98,6 +98,7 @@
         "Text",
         "Text",
         "Text",
+        "Float4",
         "Int8"
       ]
     },
@@ -112,5 +113,5 @@
       false
     ]
   },
-  "hash": "6c6ab3d20643905024c95e934322bc6f4942a339fc5f57fdbb88c9f20852ae34"
+  "hash": "ed5069e815e5262c52d3b44bc88d048957bd9aba04121e0e946539cf385b6d37"
 }
