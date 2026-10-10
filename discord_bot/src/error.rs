@@ -8,6 +8,8 @@ pub enum AppError {
     InvalidEnv { key: &'static str, reason: String },
     #[error("failed to build agent HTTP client: {0}")]
     AgentClient(#[from] reqwest::Error),
+    #[error("failed to build audio HTTP client: {0}")]
+    AudioClient(#[from] reqwest_audio::Error),
     #[error("discord client error: {0}")]
     Discord(#[source] Box<serenity::Error>),
 }

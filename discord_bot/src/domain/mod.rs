@@ -3,6 +3,7 @@
 
 mod conversation;
 mod message;
+pub mod music;
 
 pub use conversation::ConversationId;
 pub use message::{ChatRequest, ChatResponse};

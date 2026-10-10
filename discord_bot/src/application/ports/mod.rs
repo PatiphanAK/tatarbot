@@ -7,6 +7,11 @@
 
 mod agent;
 mod chat;
+mod music;
 
 pub use agent::{AgentError, AgentPort};
 pub use chat::{ChatError, ChatService};
+pub use music::{
+    MusicError, MusicService, PlayContext, PlayOutcome, ResolveError, TrackResolver, VoiceError,
+    VoicePort,
+};

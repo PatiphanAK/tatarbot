@@ -6,7 +6,8 @@ Discord ──▶ discord_bot/ (Rust) ──POST /v1/chat──▶ agent_runtime
                                                           └──▶ Tavily (web search, optional)
 ```
 
-* `discord_bot/` is the Discord adapter. It only knows the Agent Runtime's `/v1/chat` contract.
+* `discord_bot/` is the Discord adapter. It only knows the Agent Runtime's `/v1/chat` contract,
+  and plays music in voice channels (`/radio`, `/play`, …) without the runtime.
 * `agent_runtime/` handles conversation history, the system prompt, guardrails, Thai/English
   replies and a ReAct web-search agent (LangGraph). It only knows the inference backend and the
   search API.
