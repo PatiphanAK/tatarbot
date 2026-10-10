@@ -4,9 +4,10 @@ SHELL    := /bin/bash
 ENV_FILE ?= .env
 LOAD_ENV := set -a; [ -f $(ENV_FILE) ] && . ./$(ENV_FILE); set +a
 UVICORN  := uv run uvicorn --factory agent_runtime.main:create_app
+IMAGE    ?= tatarbot-agent-runtime:local
 
 .DEFAULT_GOAL := help
-.PHONY: help install env run dev test lint fmt check smoke
+.PHONY: help install env run dev test lint fmt check smoke image image-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -48,3 +49,10 @@ smoke: ## Call a running runtime: /health, /ready, /v1/chat
 	curl -s -XPOST $$URL/v1/chat -H "Authorization: Bearer $$AGENT_API_KEY" \
 		-H 'Content-Type: application/json' \
 		-d '{"message":"Say hello in one short sentence.","conversation_id":"smoke:test"}'; echo
+
+image: ## Build the container image ($(IMAGE))
+	docker build -t $(IMAGE) .
+
+image-run: ## Run the image with .env, published on 127.0.0.1:PORT (default 8080) only
+	docker run --rm --init --env-file $(ENV_FILE) -e UVICORN_HOST=0.0.0.0 -e UVICORN_PORT=8080 \
+		-p 127.0.0.1:$${PORT:-8080}:8080 $(IMAGE)

@@ -1,0 +1,45 @@
+# Integration test stack: Agent Runtime image + mock OpenAI-compatible model + a tester.
+# No Discord token, GPU or AWS credentials needed; no port is published to the host.
+# Run with ./integration/run.sh (or `make integration`).
+
+name: tatarbot-integration
+
+x-python: &python
+  image: python:3.12-slim-trixie
+  volumes:
+    - ./:/integration:ro
+  working_dir: /integration
+
+services:
+  mock_model:
+    <<: *python
+    command: ["python", "mock_openai.py", "8000"]
+    environment:
+      MOCK_API_KEY: mock-model-key
+      MOCK_MODEL_NAME: mock-model
+      MOCK_SLOW_SECONDS: "6"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2)"]
+      interval: 2s
+      retries: 15
+
+  agent_runtime:
+    build: ../agent_runtime
+    image: tatarbot-agent-runtime:integration
+    environment:
+      AGENT_API_KEY: integration-agent-key
+      MODEL_BASE_URL: http://mock_model:8000/v1
+      MODEL_NAME: mock-model
+      MODEL_API_KEY: mock-model-key
+      MODEL_TIMEOUT_SECONDS: "3"
+    depends_on:
+      mock_model:
+        condition: service_healthy
+
+  tester:
+    <<: *python
+    command: ["python", "test_stack.py", "up"]
+    environment:
+      AGENT_BASE_URL: http://agent_runtime:8080
+      AGENT_API_KEY: integration-agent-key
+    profiles: [test]
