@@ -1,4 +1,8 @@
-"""`ModelPort` adapter for vLLM's OpenAI-compatible Chat Completions API."""
+"""`ModelPort` adapter for vLLM's OpenAI-compatible Chat Completions API.
+
+Tool calling uses the standard `tools` / `tool_calls` fields; vLLM must run with
+`--enable-auto-tool-choice` and a tool-call parser for the model (`hermes` for Qwen3).
+"""
 
 import logging
 import re
@@ -8,6 +12,7 @@ import httpx
 
 from agent_runtime.application.ports import ModelPort
 from agent_runtime.domain import (
+    ChatMessage,
     InferenceRequest,
     InferenceResult,
     ModelRequestRejectedError,
@@ -15,6 +20,7 @@ from agent_runtime.domain import (
     ModelTimeoutError,
     ModelUnavailableError,
     TokenUsage,
+    ToolCall,
 )
 
 log = logging.getLogger(__name__)
@@ -75,9 +81,22 @@ class VLLMModel(ModelPort):
     def _to_body(self, request: InferenceRequest) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self._model_name,
-            "messages": [{"role": m.role.value, "content": m.content} for m in request.messages],
+            "messages": [_to_message(m) for m in request.messages],
             "stream": False,
         }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                }
+                for t in request.tools
+            ]
+            body["tool_choice"] = "auto"
         if request.params.max_tokens is not None:
             body["max_tokens"] = request.params.max_tokens
         if request.params.temperature is not None:
@@ -104,9 +123,20 @@ class VLLMModel(ModelPort):
         try:
             data = response.json()
             choice = data["choices"][0]
-            content = choice["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as e:
+            message = choice["message"]
+            content = message.get("content")
+            tool_calls = tuple(
+                ToolCall(
+                    id=str(call["id"]),
+                    name=call["function"]["name"],
+                    arguments=call["function"].get("arguments") or "{}",
+                )
+                for call in message.get("tool_calls") or ()
+            )
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             raise ModelResponseError("malformed model response") from e
+        if content is None and tool_calls:
+            content = ""
         if not isinstance(content, str):
             raise ModelResponseError("model response has no text content")
 
@@ -121,7 +151,20 @@ class VLLMModel(ModelPort):
             content=strip_reasoning(content),
             finish_reason=choice.get("finish_reason"),
             usage=token_usage,
+            tool_calls=tool_calls,
         )
+
+
+def _to_message(m: ChatMessage) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": m.role.value, "content": m.content}
+    if m.tool_calls:
+        message["tool_calls"] = [
+            {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
+            for c in m.tool_calls
+        ]
+    if m.tool_call_id is not None:
+        message["tool_call_id"] = m.tool_call_id
+    return message
 
 
 def strip_reasoning(content: str) -> str:

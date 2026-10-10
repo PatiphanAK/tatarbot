@@ -10,9 +10,10 @@ locals {
 
   # SecureString parameters created by the operator (see README); Terraform never sees values.
   secret_names = {
-    discord_token = "${var.ssm_prefix}/discord/DISCORD_TOKEN"
-    agent_api_key = "${var.ssm_prefix}/shared/AGENT_API_KEY"
-    model_api_key = "${var.ssm_prefix}/runtime/MODEL_API_KEY"
+    discord_token  = "${var.ssm_prefix}/discord/DISCORD_TOKEN"
+    agent_api_key  = "${var.ssm_prefix}/shared/AGENT_API_KEY"
+    model_api_key  = "${var.ssm_prefix}/runtime/MODEL_API_KEY"
+    tavily_api_key = "${var.ssm_prefix}/runtime/TAVILY_API_KEY"
   }
   secret_arns = {
     for k, name in local.secret_names :
@@ -21,7 +22,10 @@ locals {
 
   service_secrets = {
     discord = [local.secret_arns.discord_token, local.secret_arns.agent_api_key]
-    runtime = [local.secret_arns.agent_api_key, local.secret_arns.model_api_key]
+    runtime = concat(
+      [local.secret_arns.agent_api_key, local.secret_arns.model_api_key],
+      var.web_search_enabled ? [local.secret_arns.tavily_api_key] : [],
+    )
   }
 }
 

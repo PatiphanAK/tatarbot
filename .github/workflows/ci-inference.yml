@@ -1,0 +1,43 @@
+# Model inference config and smoke test. Runs only when they change. No GPU: the smoke
+# test runs against the integration mock OpenAI-compatible backend.
+
+name: CI inference
+
+on:
+  pull_request:
+    paths: &paths
+      - model-inference/**
+      - integration/mock_openai.py
+      - .github/workflows/ci-inference.yml
+  push:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-inference-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: compose config + smoke vs mock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: make -C model-inference check
+      - name: Smoke test against the mock backend
+        env:
+          MOCK_API_KEY: ci-key
+          MOCK_MODEL_NAME: tatarbot-chat
+          MODEL_BASE_URL: http://127.0.0.1:8000/v1
+          MODEL_NAME: tatarbot-chat
+          MODEL_API_KEY: ci-key
+        run: |
+          python3 integration/mock_openai.py 8000 &
+          for _ in $(seq 25); do curl -s -o /dev/null http://127.0.0.1:8000/ && break; sleep 0.2; done
+          python3 model-inference/scripts/smoke.py

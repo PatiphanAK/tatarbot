@@ -1,0 +1,56 @@
+# Local vLLM server (OpenAI-compatible) on this machine's NVIDIA GPU, for development.
+# Same API, served name and auth as the Runpod endpoint, so the runtime needs only a
+# different MODEL_BASE_URL. Needs the NVIDIA driver and the NVIDIA Container Toolkit.
+#
+#   make -C model-inference env      # create local/.env with a generated VLLM_API_KEY
+#   make -C model-inference serve    # start, wait until healthy
+#   make -C model-inference smoke-local
+#
+# Values come from local/.env (see .env.example); defaults fit a ~6 GB GPU.
+# The port is published on 127.0.0.1 only unless VLLM_BIND says otherwise.
+
+name: tatarbot-inference
+
+services:
+  vllm:
+    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:-v0.11.0}
+    # The image's entrypoint is `vllm serve`; a string command is split into arguments.
+    # Tool calling (the runtime's web_search) needs auto tool choice and the model's
+    # parser: hermes for Qwen3.
+    command: >-
+      --model ${MODEL:-Qwen/Qwen3-1.7B}
+      --served-model-name ${SERVED_MODEL_NAME:-tatarbot-chat}
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.85}
+      --max-num-seqs ${MAX_NUM_SEQS:-8}
+      --enable-auto-tool-choice --tool-call-parser ${TOOL_CALL_PARSER:-hermes}
+      --host 0.0.0.0 --port 8000
+      ${VLLM_EXTRA_ARGS:-}
+    environment:
+      # vLLM rejects /v1/* requests without `Authorization: Bearer <VLLM_API_KEY>`.
+      VLLM_API_KEY: ${VLLM_API_KEY:?set VLLM_API_KEY in model-inference/local/.env}
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - ${VLLM_BIND:-127.0.0.1}:${VLLM_PORT:-8000}:8000
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      # /health needs no key; it turns 200 once weights are loaded and the engine is up.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15m
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  # Downloaded weights survive restarts and `make stop`; `make clean` removes them.
+  hf-cache:

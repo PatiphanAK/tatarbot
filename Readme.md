@@ -2,11 +2,16 @@
 
 ```text
 Discord ──▶ discord_bot/ (Rust) ──POST /v1/chat──▶ agent_runtime/ (Python) ──▶ vLLM / Qwen
+                                                          │
+                                                          └──▶ Tavily (web search, optional)
 ```
 
 * `discord_bot/` is the Discord adapter. It only knows the Agent Runtime's `/v1/chat` contract.
-* `agent_runtime/` handles conversation history, the system prompt and the model port. It
-  only knows the inference backend.
+* `agent_runtime/` handles conversation history, the system prompt, guardrails, Thai/English
+  replies and a ReAct web-search agent (LangGraph). It only knows the inference backend and the
+  search API.
+* `model-inference/` serves the model with vLLM: a local GPU server (Docker Compose) and the
+  Runpod Serverless endpoint config, plus a smoke test of the endpoint. See its README.
 
 ```sh
 make up      # start the runtime on :8080, then the bot
@@ -72,6 +77,7 @@ Failed turns are not stored in history. Upstream bodies, URLs and keys never rea
 |---|---|---|
 | `ci-runtime.yml` | `agent_runtime/**`, `integration/**`, `compose.yaml` change | ruff, pytest, image build, integration tests |
 | `ci-discord.yml` | `discord_bot/**`, `compose.yaml` change | fmt, clippy, tests, image build, startup and SIGTERM smoke tests |
+| `ci-inference.yml` | `model-inference/**` change | inference Compose config, endpoint smoke test against the mock model |
 | `ci-repo.yml` | `.github/**`, compose files, `infra/**` change | actionlint, `docker compose config`, `terraform fmt` + `validate` (offline) |
 | `deploy-runtime.yml` / `deploy-discord.yml` | manual only | via `_deploy-ecs.yml`: push `sha-<commit>` image to ECR (skipped if it exists), new task-definition revision, rolling ECS update |
 

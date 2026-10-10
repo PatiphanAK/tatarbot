@@ -20,3 +20,7 @@ class ModelRequestRejectedError(ModelError):
 
 class ModelResponseError(ModelError):
     """The backend answered with something unusable (malformed or empty)."""
+
+
+class SearchError(Exception):
+    """The search provider failed. The agent reports it to the model; the turn goes on."""

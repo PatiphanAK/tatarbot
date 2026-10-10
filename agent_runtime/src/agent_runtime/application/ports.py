@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from agent_runtime.domain import ChatMessage, InferenceRequest, InferenceResult
+from agent_runtime.domain import ChatMessage, InferenceRequest, InferenceResult, SearchResult
 
 
 class ModelPort(ABC):
@@ -35,3 +35,13 @@ class ConversationStore(ABC):
 
     @abstractmethod
     async def append(self, conversation_id: str, messages: Sequence[ChatMessage]) -> None: ...
+
+
+class SearchPort(ABC):
+    """Web search (Tavily today). Implementations raise `SearchError` on failure."""
+
+    @abstractmethod
+    async def search(self, query: str, max_results: int) -> list[SearchResult]: ...
+
+    async def aclose(self) -> None:  # noqa: B027 - optional hook
+        """Release resources (connections...)."""

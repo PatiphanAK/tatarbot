@@ -3,6 +3,7 @@
 Nothing in here may import FastAPI, httpx, or know about Discord or vLLM.
 """
 
+from agent_runtime.domain import guardrails
 from agent_runtime.domain.errors import (
     InvalidInputError,
     ModelError,
@@ -10,6 +11,7 @@ from agent_runtime.domain.errors import (
     ModelResponseError,
     ModelTimeoutError,
     ModelUnavailableError,
+    SearchError,
 )
 from agent_runtime.domain.inference import (
     ChatMessage,
@@ -18,7 +20,11 @@ from agent_runtime.domain.inference import (
     InferenceResult,
     Role,
     TokenUsage,
+    ToolCall,
+    ToolSpec,
 )
+from agent_runtime.domain.language import Language, detect_language
+from agent_runtime.domain.search import SearchResult
 
 __all__ = [
     "ChatMessage",
@@ -26,11 +32,18 @@ __all__ = [
     "InferenceRequest",
     "InferenceResult",
     "InvalidInputError",
+    "Language",
     "ModelError",
     "ModelRequestRejectedError",
     "ModelResponseError",
     "ModelTimeoutError",
     "ModelUnavailableError",
     "Role",
+    "SearchError",
+    "SearchResult",
     "TokenUsage",
+    "ToolCall",
+    "ToolSpec",
+    "detect_language",
+    "guardrails",
 ]

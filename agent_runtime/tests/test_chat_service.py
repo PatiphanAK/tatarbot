@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from conftest import SYSTEM_PROMPT, FakeModel
+from conftest import SYSTEM_EN, SYSTEM_PROMPT, FakeModel
 
 from agent_runtime.adapters.outbound.memory_store import InMemoryConversationStore
 from agent_runtime.application import ChatService, ChatSettings
@@ -37,7 +37,7 @@ async def test_model_port_receives_system_history_and_params():
 
     request = model.requests[1]
     assert request.messages == (
-        ChatMessage(Role.SYSTEM, SYSTEM_PROMPT),
+        ChatMessage(Role.SYSTEM, SYSTEM_EN),
         ChatMessage(Role.USER, "q1"),
         ChatMessage(Role.ASSISTANT, "a1"),
         ChatMessage(Role.USER, "q2"),
@@ -62,7 +62,7 @@ async def test_zero_history_sends_only_system_and_user():
     await chat.chat("c", "q0")
     await chat.chat("c", "q1")
 
-    assert [m.content for m in model.requests[-1].messages] == [SYSTEM_PROMPT, "q1"]
+    assert [m.content for m in model.requests[-1].messages] == [SYSTEM_EN, "q1"]
 
 
 async def test_empty_model_reply_is_an_error_and_not_stored():
