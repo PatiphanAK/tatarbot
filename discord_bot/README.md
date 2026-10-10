@@ -60,6 +60,16 @@ url_resolver.rs    songbird_voice.rs ──▶ Discord voice (Songbird, DAVE E2E
 | `AGENT_TIMEOUT_SECS` | no | `120` | Request timeout |
 | `MUSIC_STATIONS_FILE` | no | built-in `stations.toml` | Radio stations for `/radio` (TOML, 1–25 entries) |
 | `MUSIC_MAX_QUEUE` | no | `50` | Tracks per server, including the one playing (1–500) |
+| `DATABASE_URL` | for the library | – | Postgres for library metadata (secret). Library is on only with this **and** `MUSIC_S3_BUCKET` |
+| `MUSIC_S3_BUCKET` | for the library | – | Bucket for library audio |
+| `MUSIC_S3_PREFIX` | no | `library/` | Key prefix for library objects |
+| `MUSIC_S3_ENDPOINT` | no | AWS | S3-compatible endpoint (RustFS locally); path-style addressing |
+| `MUSIC_S3_CREATE_BUCKET` | no | `false` | Create the bucket at start (local development) |
+| `MUSIC_UPLOAD_ROLE` | no | `DJ` | Role name (per server) allowed to upload and delete others' tracks; Manage Server always is |
+| `MUSIC_GUILD_QUOTA_MB` | no | `500` | Library storage per server |
+| `DATABASE_MAX_CONNECTIONS` | no | `3` | Pool size (keep small for Supavisor session mode) |
+| `FFMPEG_PATH`, `FFPROBE_PATH` | no | on `PATH` | ffmpeg binaries (bundled in the image) |
+| `AWS_*` | for the library | ECS task role | S3 credentials/region (default AWS chain) |
 
 ## Agent Runtime contract
 
@@ -150,6 +160,84 @@ no ffmpeg, no YouTube. Each playing server costs some CPU for Opus encoding; the
 On startup the bot registers these slash commands globally (replacing the `/chat` command
 of earlier versions) and removes leftover per-server commands.
 
+## Server library (Phase 1.5)
+
+Each server gets its own library of uploaded audio. Enabled when `DATABASE_URL` and
+`MUSIC_S3_BUCKET` are both set (one without the other is a startup error).
+
+| Command | Does |
+|---|---|
+| `/upload <file> [title]` | Adds an audio attachment (upload role or Manage Server) |
+| `/play <title>` | Plays the best match from this server's library; titles autocomplete. A link still plays directly |
+| `/library [page]` | Lists tracks, 10 per page, with storage used / quota |
+| `/delete <track>` | Removes a track (autocomplete); the uploader or the upload role |
+
+```text
+/upload ─▶ size check ─▶ download (Discord CDN only, ≤ 25 MB, SHA-256) ─▶ already here? ─▶
+  stored by any server? ── yes ─▶ reuse ──────────────────────────────┐
+           └─ no ─▶ ffprobe (audio? ≤ 15 min) ─▶ ffmpeg ─▶ Ogg Opus ───┤
+                                                                      ▼
+            Postgres tx: lock guild + hash, quota, PUT object, INSERT row, commit
+/play title ─▶ search ─▶ queue ─▶ (when it starts) presign 30 min ─▶ stream, Opus passthrough
+```
+
+* **Validation:** never by extension. ffprobe must find an audio stream and a duration of at
+  most 15 minutes. Both ffprobe and ffmpeg run on local `file:` paths only, with
+  `-protocol_whitelist file` and a demuxer whitelist (mp3, ogg, flac, wav, mp4/m4a,
+  mkv/webm, aac). Each runs with limits (512 MB address space, CPU seconds, 64 MB output, a
+  wall-clock timeout), one transcode at a time. The image's ffmpeg is a minimal static build
+  with only those demuxers and the file protocol: HLS, m3u, concat and network inputs aren't
+  compiled in. A crafted HLS or concat playlist that makes a stock ffmpeg read another local
+  file fails on both counts (tested).
+* **Stored once:** objects are keyed by the SHA-256 of the *uploaded original*
+  (`library/<hash>.ogg`), so the same file in many servers is one object and is transcoded
+  once. Each server's quota counts it in full.
+* **Playback:** the object is presigned when the track starts (so a long queue can't outlive
+  the URL) and fetched with a separate client. Ogg Opus 48 kHz stereo with 20 ms frames is
+  what Discord sends, so Songbird passes it through without re-encoding while it is the only
+  track at full volume.
+* **Consistency** (`pg_library.rs`): upload and delete take `pg_advisory_xact_lock` on the
+  hash and write/delete the object while holding it, so an upload can't attach a row to an
+  object being deleted. Upload also locks the server, so concurrent uploads can't both pass
+  the quota. An hourly sweep deletes objects with no row that are older than 1 hour, and
+  re-checks row count and age under the same lock. A crash between object write and commit
+  leaves an orphan that the sweep removes later.
+* **Without the database** (e.g. a paused Supabase project) the bot starts and works: radio
+  and links play, library commands answer "temporarily unavailable", and a supervisor
+  reconnects with backoff (1 s up to 5 min), running migrations on connect. After 10 minutes
+  down it logs a hint about paused Supabase projects. A track already playing keeps playing.
+
+### Postgres: local and Supabase
+
+Locally, `make library-up` starts Postgres and RustFS from `../compose.yaml` (on
+`127.0.0.1:55432` and `:59000`). Production is Supabase (free tier, Singapore) through the
+**Supavisor pooler in session mode** (port 5432). Transaction mode (6543) breaks sqlx's
+prepared statements. Use TLS with verification; the image includes Supabase's public root CA
+(the pooler's `*.pooler.supabase.com` certificate verifies against it):
+
+```text
+DATABASE_URL=postgres://postgres.<project-ref>:<password>@aws-1-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=verify-full&sslrootcert=/etc/tatarbot/supabase-root-2021.crt
+```
+
+Pausing: Supabase pauses free projects without "sufficient user database activity over the
+past week"; its docs say "a few user requests to the database each day" are enough. The bot
+reads the library table every 6 hours as a keep-alive (it also health-checks every minute).
+A paused project is **not** resumed by connecting: use "Resume project" in the dashboard.
+
+### Developing the library
+
+```sh
+make library-up      # Postgres + RustFS (compose)
+make test-db         # integration tests: advisory-lock races, sweep, S3, ffmpeg, end to end
+make sqlx-prepare    # after changing SQL: migrate + refresh the .sqlx cache (commit it)
+make sqlx-check      # CI: fail if .sqlx is stale
+```
+
+Queries are checked at compile time from the committed `.sqlx/` cache
+(`.cargo/config.toml` sets `SQLX_OFFLINE=true`), so builds never need, or contact, a
+database. Migrations live in `migrations/` and are embedded in the binary. The race tests
+were checked by removing each lock: they fail without it.
+
 ## Container
 
 ```sh
@@ -158,7 +246,9 @@ make image-run   # with .env; a runtime on this machine is http://host.docker.in
 ```
 
 Release Rust build in a distroless image (glibc + CA certificates, no shell), non-root. The
-bot needs no inbound port; voice uses outbound UDP only. If Discord is unreachable at start
+bot needs no inbound port; voice uses outbound UDP only. With the library, `/tmp` must be
+writable (download and transcode); ECS mounts a scratch volume there and keeps the root
+filesystem read-only. If Discord is unreachable at start
 it retries with backoff (a rejected token still fails at once). It stops on Ctrl-C or SIGTERM
 (`docker stop`, ECS) by leaving voice channels and closing the gateway connection, waiting at
 most 5 s for each. `DISCORD_TOKEN` and `AGENT_API_KEY` are read from

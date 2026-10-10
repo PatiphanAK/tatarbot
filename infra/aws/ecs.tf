@@ -148,6 +148,13 @@ resource "aws_ecs_task_definition" "discord" {
   cpu                      = var.discord_cpu
   memory                   = var.discord_memory
   execution_role_arn       = aws_iam_role.execution["discord"].arn
+  task_role_arn            = one(aws_iam_role.discord_task[*].arn)
+
+  # Writable scratch space for library uploads (download + transcode); the root
+  # filesystem stays read-only.
+  volume {
+    name = "tmp"
+  }
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -160,15 +167,33 @@ resource "aws_ecs_task_definition" "discord" {
       image                  = "${aws_ecr_repository.service["discord"].repository_url}:${local.bootstrap_tag}"
       essential              = true
       readonlyRootFilesystem = true
-      environment = [
-        { name = "AGENT_BASE_URL", value = local.runtime_url },
-        { name = "AGENT_TIMEOUT_SECS", value = tostring(var.agent_timeout_secs) },
-        { name = "RUST_LOG", value = "info,serenity=warn" },
-      ]
-      secrets = [
-        { name = "DISCORD_TOKEN", valueFrom = local.secret_arns.discord_token },
-        { name = "AGENT_API_KEY", valueFrom = local.secret_arns.agent_api_key },
-      ]
+      mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+      environment = concat(
+        [
+          { name = "AGENT_BASE_URL", value = local.runtime_url },
+          { name = "AGENT_TIMEOUT_SECS", value = tostring(var.agent_timeout_secs) },
+          { name = "RUST_LOG", value = "info,serenity=warn" },
+        ],
+        var.music_library_enabled ? [
+          { name = "MUSIC_S3_BUCKET", value = local.music_bucket },
+          { name = "MUSIC_S3_PREFIX", value = var.music_library_prefix },
+          { name = "AWS_REGION", value = var.region },
+          { name = "MUSIC_GUILD_QUOTA_MB", value = tostring(var.music_guild_quota_mb) },
+          { name = "MUSIC_UPLOAD_ROLE", value = var.music_upload_role },
+        ] : [],
+      )
+      secrets = concat(
+        [
+          { name = "DISCORD_TOKEN", valueFrom = local.secret_arns.discord_token },
+          { name = "AGENT_API_KEY", valueFrom = local.secret_arns.agent_api_key },
+        ],
+        # Supabase via Supavisor session mode, e.g.
+        # postgres://postgres.<ref>:<pw>@aws-1-ap-southeast-1.pooler.supabase.com:5432/postgres
+        #   ?sslmode=verify-full&sslrootcert=/etc/tatarbot/supabase-root-2021.crt
+        var.music_library_enabled ? [
+          { name = "DATABASE_URL", valueFrom = local.secret_arns.database_url },
+        ] : [],
+      )
       # The bot closes its gateway connection on SIGTERM within a few seconds.
       stopTimeout      = 30
       logConfiguration = local.log_options.discord

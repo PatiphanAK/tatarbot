@@ -1,0 +1,6 @@
+# Compile sqlx `query!` macros from the committed `.sqlx/` cache, so builds
+# (CI, Docker, `make check`) never need a database, and a DATABASE_URL in .env
+# (e.g. Supabase) is never contacted at compile time. `cargo sqlx prepare`
+# overrides this to refresh the cache: see `make sqlx-prepare`.
+[env]
+SQLX_OFFLINE = "true"

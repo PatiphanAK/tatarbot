@@ -46,6 +46,17 @@ pub fn client() -> Result<reqwest_audio::Client, reqwest_audio::Error> {
         .build()
 }
 
+/// For presigned library URLs (our own bucket), without the public-address
+/// guard: the bucket is on localhost/a private network in development.
+pub fn trusted_client() -> Result<reqwest_audio::Client, reqwest_audio::Error> {
+    reqwest_audio::Client::builder()
+        .user_agent(USER_AGENT)
+        .redirect(redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+}
+
 /// False for URLs whose host is an IP literal (or `localhost`) outside the
 /// public internet. Hostnames are left to `PublicOnlyResolver`.
 pub fn is_public_url(url: &Url) -> bool {

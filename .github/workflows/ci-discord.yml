@@ -44,6 +44,38 @@ jobs:
           workspaces: discord_bot
       - run: make check
 
+  library:
+    name: library (Postgres races, RustFS, ffmpeg, sqlx cache)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: discord_bot
+    env:
+      SQLX_CLI_VERSION: "0.9.0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: discord_bot
+          cache-bin: true
+      - name: Install ffmpeg and sqlx-cli
+        run: |
+          sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends ffmpeg
+          sqlx --version 2>/dev/null | grep -q "$SQLX_CLI_VERSION" ||
+            cargo install sqlx-cli --version "$SQLX_CLI_VERSION" --locked \
+              --no-default-features --features rustls,postgres
+      # Starts Postgres + RustFS from ../compose.yaml, then runs the ignored
+      # integration tests: advisory-lock races, sweep grace, S3, ffmpeg, end to end.
+      - run: make test-db
+      - name: .sqlx cache matches the queries
+        run: make sqlx-check
+
   image:
     name: image build + smoke
     runs-on: ubuntu-latest

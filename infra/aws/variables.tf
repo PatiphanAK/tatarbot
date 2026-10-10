@@ -106,6 +106,40 @@ variable "web_search_enabled" {
   default     = true
 }
 
+variable "music_library_enabled" {
+  description = "Server music library: S3 bucket, bot task role, DATABASE_URL from SSM (the parameter must exist)."
+  type        = bool
+  default     = false
+}
+
+variable "music_library_bucket" {
+  description = "Bucket name for library audio; empty means tatarbot-music-<account id>."
+  type        = string
+  default     = ""
+}
+
+variable "music_library_prefix" {
+  description = "Key prefix for library objects; the task role is scoped to it."
+  type        = string
+  default     = "library/"
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9/_-]*/$", var.music_library_prefix))
+    error_message = "music_library_prefix must end with / and not start with /."
+  }
+}
+
+variable "music_guild_quota_mb" {
+  description = "Library storage per Discord server, in MB (each server counts shared files in full)."
+  type        = number
+  default     = 500
+}
+
+variable "music_upload_role" {
+  description = "Discord role name (per server) that may upload and delete others' tracks."
+  type        = string
+  default     = "DJ"
+}
+
 variable "runtime_extra_environment" {
   description = "Further non-secret runtime settings, e.g. { MODEL_ENABLE_THINKING = \"false\" }."
   type        = map(string)

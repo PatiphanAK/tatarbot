@@ -14,6 +14,73 @@ pub struct Config {
     pub discord: DiscordConfig,
     pub agent: AgentConfig,
     pub music: MusicConfig,
+    /// The server library; `None` unless both DATABASE_URL and
+    /// MUSIC_S3_BUCKET are set.
+    pub library: Option<LibraryConfig>,
+}
+
+#[derive(Clone)]
+pub struct LibraryConfig {
+    pub database_url: String,
+    pub max_connections: u32,
+    pub bucket: String,
+    pub prefix: String,
+    pub endpoint: Option<String>,
+    /// Local development: create the bucket if missing.
+    pub create_bucket: bool,
+    /// Role name (per server) that may upload and delete others' tracks.
+    pub upload_role: String,
+    pub quota_bytes: u64,
+    pub ffmpeg: std::path::PathBuf,
+    pub ffprobe: std::path::PathBuf,
+}
+
+impl LibraryConfig {
+    fn from_env() -> Result<Option<Self>, AppError> {
+        let (database_url, bucket) = match (optional("DATABASE_URL"), optional("MUSIC_S3_BUCKET")) {
+            (None, None) => return Ok(None),
+            (Some(url), Some(bucket)) => (url, bucket),
+            (Some(_), None) => return Err(AppError::MissingEnv("MUSIC_S3_BUCKET")),
+            (None, Some(_)) => return Err(AppError::MissingEnv("DATABASE_URL")),
+        };
+        let prefix = optional("MUSIC_S3_PREFIX").unwrap_or_else(|| "library/".to_owned());
+        if !prefix.ends_with('/') || prefix.starts_with('/') {
+            return Err(invalid(
+                "MUSIC_S3_PREFIX",
+                "must end with / and not start with /",
+            ));
+        }
+        let quota_mb = parse_range("MUSIC_GUILD_QUOTA_MB", 1..=100_000, 500)?;
+        Ok(Some(Self {
+            database_url,
+            max_connections: parse_range("DATABASE_MAX_CONNECTIONS", 1..=20, 3)? as u32,
+            bucket,
+            prefix,
+            endpoint: optional("MUSIC_S3_ENDPOINT"),
+            create_bucket: optional("MUSIC_S3_CREATE_BUCKET").is_some_and(|v| v == "true"),
+            upload_role: optional("MUSIC_UPLOAD_ROLE").unwrap_or_else(|| "DJ".to_owned()),
+            quota_bytes: quota_mb * 1024 * 1024,
+            ffmpeg: optional("FFMPEG_PATH")
+                .unwrap_or_else(|| "ffmpeg".into())
+                .into(),
+            ffprobe: optional("FFPROBE_PATH")
+                .unwrap_or_else(|| "ffprobe".into())
+                .into(),
+        }))
+    }
+}
+
+impl fmt::Debug for LibraryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LibraryConfig")
+            .field("database_url", &"<redacted>")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("endpoint", &self.endpoint)
+            .field("upload_role", &self.upload_role)
+            .field("quota_bytes", &self.quota_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +140,7 @@ impl Config {
             .unwrap_or(50);
 
         Ok(Self {
+            library: LibraryConfig::from_env()?,
             music: MusicConfig {
                 stations,
                 max_queue,
@@ -114,6 +182,31 @@ fn required(key: &'static str) -> Result<String, AppError> {
     optional(key).ok_or(AppError::MissingEnv(key))
 }
 
+fn parse_range(
+    key: &'static str,
+    range: std::ops::RangeInclusive<u64>,
+    default: u64,
+) -> Result<u64, AppError> {
+    match optional(key) {
+        None => Ok(default),
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|n| range.contains(n))
+            .ok_or_else(|| {
+                invalid(
+                    key,
+                    &format!(
+                        "must be an integer from {} to {}",
+                        range.start(),
+                        range.end()
+                    ),
+                )
+            }),
+    }
+}
+
 fn invalid(key: &'static str, reason: &str) -> AppError {
     AppError::InvalidEnv {
         key,
@@ -135,7 +228,20 @@ mod tests {
         let discord = DiscordConfig {
             token: "discord-secret".into(),
         };
-        let out = format!("{agent:?} {discord:?}");
+        let library = LibraryConfig {
+            database_url: "postgres://u:db-secret@h/d".into(),
+            max_connections: 3,
+            bucket: "b".into(),
+            prefix: "library/".into(),
+            endpoint: None,
+            create_bucket: false,
+            upload_role: "DJ".into(),
+            quota_bytes: 1,
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+        };
+        let out = format!("{agent:?} {discord:?} {library:?}");
         assert!(!out.contains("super-secret") && !out.contains("discord-secret"));
+        assert!(!out.contains("db-secret"));
     }
 }
