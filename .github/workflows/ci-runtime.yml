@@ -1,0 +1,59 @@
+# CI for agent_runtime only: lint, unit tests, image build and integration tests against a
+# mock OpenAI-compatible model. No secrets, no Discord, no GPU, no AWS.
+
+name: CI runtime
+
+on:
+  pull_request:
+    paths: &paths
+      - agent_runtime/**
+      - integration/**
+      - compose.yaml
+      - .github/workflows/ci-runtime.yml
+  push:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.8.22" # keep in sync with agent_runtime/Dockerfile
+
+jobs:
+  checks:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent_runtime
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          working-directory: agent_runtime
+          cache-dependency-glob: agent_runtime/uv.lock
+      - run: uv sync --locked
+      - run: make lint
+      - name: Lint integration tests
+        run: uv run ruff check ../integration && uv run ruff format --check ../integration
+      - run: make test
+
+  image-integration:
+    name: image + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build runtime image and test it against the mock model
+        run: ./integration/run.sh

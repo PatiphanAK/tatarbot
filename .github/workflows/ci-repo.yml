@@ -1,0 +1,60 @@
+# Shared configuration: workflows, Compose files and Terraform. Runs only when they change.
+# Terraform is validated offline (no backend, no AWS credentials, no plan/apply).
+
+name: CI repo
+
+on:
+  pull_request:
+    paths: &paths
+      - .github/**
+      - compose.yaml
+      - integration/compose.yaml
+      - infra/**
+  push:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-repo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -no-color
+
+  compose:
+    name: compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: docker compose config -q
+      - run: docker compose -f integration/compose.yaml config -q
+
+  terraform:
+    name: terraform fmt + validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.5
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
