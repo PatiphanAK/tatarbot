@@ -3,39 +3,112 @@
 //! user data, so the queue can be listed without a second data structure.
 //!
 //! Sources are opened lazily when a track starts (Songbird `Compose`), so a
-//! queued link is not fetched until its turn.
+//! queued link is not fetched until its turn, and a library object is
+//! presigned only then (a long queue can't outlive the URL). Library audio is
+//! Ogg Opus 48 kHz stereo, which Songbird passes through without re-encoding
+//! while it is the only track playing at full volume.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use songbird::events::{Event, EventContext, EventHandler, TrackEvent};
-use songbird::input::{HttpRequest, Input};
+use songbird::input::{AudioStream, AudioStreamError, Compose, HttpRequest, Input};
 use songbird::tracks::Track as SongbirdTrack;
 use songbird::{Call, Songbird};
+use symphonia::core::io::MediaSource;
 use tokio::sync::Mutex;
 
-use crate::application::ports::{VoiceError, VoicePort};
+use crate::application::ports::{ObjectStore, VoiceError, VoicePort};
 use crate::domain::music::{GuildId, Track, TrackInfo, TrackSource, VoiceChannelId};
+
+/// Longer than the longest library track (15 min), for reconnects and seeks.
+const PRESIGN_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Playback of library objects: where they live and how to fetch them.
+pub struct LibraryAudio {
+    pub store: Arc<dyn ObjectStore>,
+    /// Plain client: presigned URLs point at our own bucket (localhost in dev),
+    /// never at user input, so the public-address guard doesn't apply.
+    pub http: reqwest_audio::Client,
+}
 
 pub struct SongbirdVoice {
     manager: Arc<Songbird>,
     http: reqwest_audio::Client,
+    library: Option<Arc<LibraryAudio>>,
 }
 
 impl SongbirdVoice {
-    pub fn new(manager: Arc<Songbird>, http: reqwest_audio::Client) -> Self {
-        Self { manager, http }
+    pub fn new(
+        manager: Arc<Songbird>,
+        http: reqwest_audio::Client,
+        library: Option<Arc<LibraryAudio>>,
+    ) -> Self {
+        Self {
+            manager,
+            http,
+            library,
+        }
     }
 
     fn call(&self, guild: GuildId) -> Option<Arc<Mutex<Call>>> {
         self.manager.get(songbird_guild(guild)?)
     }
 
-    fn input(&self, source: &TrackSource) -> Input {
-        match source {
+    fn input(&self, source: &TrackSource) -> Result<Input, VoiceError> {
+        Ok(match source {
             TrackSource::Http(url) => HttpRequest::new(self.http.clone(), url.to_string()).into(),
-        }
+            TrackSource::Library { key } => {
+                let library = self
+                    .library
+                    .clone()
+                    .ok_or_else(|| VoiceError::Other("library playback not configured".into()))?;
+                Input::Lazy(Box::new(PresignedObject {
+                    library,
+                    key: key.clone(),
+                }))
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+impl SongbirdVoice {
+    pub fn input_for_test(&self, source: &TrackSource) -> Input {
+        self.input(source).unwrap()
+    }
+}
+
+/// Presigns a library object when Songbird starts the track.
+struct PresignedObject {
+    library: Arc<LibraryAudio>,
+    key: String,
+}
+
+#[async_trait]
+impl Compose for PresignedObject {
+    fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
+        Err(AudioStreamError::Unsupported)
+    }
+
+    async fn create_async(
+        &mut self,
+    ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
+        let url = self
+            .library
+            .store
+            .presign_get(&self.key, PRESIGN_TTL)
+            .await
+            .map_err(|e| AudioStreamError::Fail(Box::new(e)))?;
+        HttpRequest::new(self.library.http.clone(), url)
+            .create_async()
+            .await
+    }
+
+    fn should_create_async(&self) -> bool {
+        true
     }
 }
 
@@ -88,7 +161,7 @@ impl VoicePort for SongbirdVoice {
 
     async fn enqueue(&self, guild: GuildId, track: Track) -> Result<usize, VoiceError> {
         let call = self.call(guild).ok_or(VoiceError::NotConnected)?;
-        let input = self.input(&track.source);
+        let input = self.input(&track.source)?;
         let mut call = call.lock().await;
         call.enqueue(SongbirdTrack::new_with_data(input, Arc::new(track.info)))
             .await;
@@ -175,10 +248,12 @@ mod tests {
     #[ignore = "needs internet access"]
     async fn stations_decode() {
         let manager = Songbird::serenity();
-        let voice = SongbirdVoice::new(manager, audio_http::client().unwrap());
+        let voice = SongbirdVoice::new(manager, audio_http::client().unwrap(), None);
         let stations = StationList::from_toml(include_str!("../../../stations.toml")).unwrap();
         for station in stations.iter() {
-            let input = voice.input(&TrackSource::Http(station.url.clone()));
+            let input = voice
+                .input(&TrackSource::Http(station.url.clone()))
+                .unwrap();
             let input = input
                 .make_playable_async(get_codec_registry(), get_probe())
                 .await
@@ -202,10 +277,11 @@ mod tests {
             listener.local_addr().unwrap().port()
         ))
         .unwrap();
-        let voice = SongbirdVoice::new(Songbird::serenity(), audio_http::client().unwrap());
+        let voice = SongbirdVoice::new(Songbird::serenity(), audio_http::client().unwrap(), None);
 
         let result = voice
             .input(&TrackSource::Http(url))
+            .unwrap()
             .make_playable_async(get_codec_registry(), get_probe())
             .await;
 

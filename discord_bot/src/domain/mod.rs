@@ -2,6 +2,7 @@
 //! Discord, HTTP, or any concrete agent runtime.
 
 mod conversation;
+pub mod library;
 mod message;
 pub mod music;
 

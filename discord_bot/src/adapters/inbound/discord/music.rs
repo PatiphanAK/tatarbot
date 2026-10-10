@@ -14,8 +14,9 @@ use crate::domain::music::{GuildId, StationList, UserId, VoiceChannelId};
 const MAX_QUERY_LENGTH: u16 = 500;
 const CHOICE_NAME_LIMIT: usize = 100;
 
-/// Every music command, registered globally on startup.
-pub fn commands(stations: &StationList) -> Vec<CreateCommand> {
+/// Every music command, registered globally on startup. With a library,
+/// `/play` also takes titles and suggests them as you type.
+pub fn commands(stations: &StationList, library: bool) -> Vec<CreateCommand> {
     let guild_only = || vec![InteractionContext::Guild];
     let radio_station = stations.iter().fold(
         CreateCommandOption::new(CommandOptionType::String, "station", "Station to play")
@@ -30,12 +31,25 @@ pub fn commands(stations: &StationList) -> Vec<CreateCommand> {
     );
     vec![
         CreateCommand::new("play")
-            .description("Play a direct audio link (mp3, ogg, aac, flac, wav, or a stream URL)")
+            .description(if library {
+                "Play a track from this server's library, or a direct audio link"
+            } else {
+                "Play a direct audio link (mp3, ogg, aac, flac, wav, or a stream URL)"
+            })
             .contexts(guild_only())
             .add_option(
-                CreateCommandOption::new(CommandOptionType::String, "query", "Audio link")
-                    .required(true)
-                    .max_length(MAX_QUERY_LENGTH),
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "query",
+                    if library {
+                        "Title or audio link"
+                    } else {
+                        "Audio link"
+                    },
+                )
+                .required(true)
+                .max_length(MAX_QUERY_LENGTH)
+                .set_autocomplete(library),
             ),
         CreateCommand::new("radio")
             .description("Play a radio station (replaces the queue)")

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT size_bytes, duration_ms FROM library_tracks WHERE content_hash = $1 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "library_tracks",
+            "name": "size_bytes"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "duration_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "library_tracks",
+            "name": "duration_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b216e2dc949b29e6ff8d4b19f97af4a2e962e336d1c7b4a9c1c263c14dd70e1f"
+}

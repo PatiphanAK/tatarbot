@@ -7,7 +7,8 @@ Discord ──▶ discord_bot/ (Rust) ──POST /v1/chat──▶ agent_runtime
 ```
 
 * `discord_bot/` is the Discord adapter. It only knows the Agent Runtime's `/v1/chat` contract,
-  and plays music in voice channels (`/radio`, `/play`, …) without the runtime.
+  and plays music in voice channels (`/radio`, `/play`, …) without the runtime, including a
+  per-server library of uploaded audio (Postgres + S3; `postgres` and `rustfs` in Compose).
 * `agent_runtime/` handles conversation history, the system prompt, guardrails, Thai/English
   replies and a ReAct web-search agent (LangGraph). It only knows the inference backend and the
   search API.
@@ -77,7 +78,7 @@ Failed turns are not stored in history. Upstream bodies, URLs and keys never rea
 | Workflow | Runs when | Does |
 |---|---|---|
 | `ci-runtime.yml` | `agent_runtime/**`, `integration/**`, `compose.yaml` change | ruff, pytest, image build, integration tests |
-| `ci-discord.yml` | `discord_bot/**`, `compose.yaml` change | fmt, clippy, tests, image build, startup and SIGTERM smoke tests |
+| `ci-discord.yml` | `discord_bot/**`, `compose.yaml` change | fmt, clippy, tests; library integration tests (Postgres races, RustFS, ffmpeg) + `.sqlx` check; image build, startup and SIGTERM smoke tests |
 | `ci-inference.yml` | `model-inference/**` change | inference Compose config, endpoint smoke test against the mock model |
 | `ci-repo.yml` | `.github/**`, compose files, `infra/**` change | actionlint, `docker compose config`, `terraform fmt` + `validate` (offline) |
 | `deploy-runtime.yml` / `deploy-discord.yml` | manual only | via `_deploy-ecs.yml`: push `sha-<commit>` image to ECR (skipped if it exists), new task-definition revision, rolling ECS update |

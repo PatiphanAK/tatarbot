@@ -7,10 +7,17 @@
 
 mod agent;
 mod chat;
+mod library;
 mod music;
 
 pub use agent::{AgentError, AgentPort};
 pub use chat::{ChatError, ChatService};
+pub use library::{
+    AddOutcome, Attachment, AttachmentFetcher, AudioError, AudioProcessor, FetchError, Fetched,
+    LibraryError, LibraryPage, LibraryRepository, LibraryService, NewTrack, ObjectStore,
+    PreparedAudio, ProbeResult, RepoError, StoreError, StoredAudio, SweepReport, UploadOutcome,
+    UploadRequest,
+};
 pub use music::{
     MusicError, MusicService, PlayContext, PlayOutcome, ResolveError, TrackResolver, VoiceError,
     VoicePort,

@@ -73,6 +73,19 @@ pub trait TrackResolver: Send + Sync {
     ) -> Result<Track, ResolveError>;
 }
 
+/// Lets the composition root pick a resolver at runtime.
+#[async_trait]
+impl TrackResolver for std::sync::Arc<dyn TrackResolver> {
+    async fn resolve(
+        &self,
+        guild: GuildId,
+        requested_by: UserId,
+        query: &str,
+    ) -> Result<Track, ResolveError> {
+        (**self).resolve(guild, requested_by, query).await
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum ResolveError {
     #[error("not a valid link: {0}")]
@@ -84,6 +97,10 @@ pub enum ResolveError {
     /// The query is not a URL and there is no library to search (yet).
     #[error("searching by title is not available")]
     SearchUnavailable,
+    #[error("the server library is temporarily unavailable")]
+    LibraryUnavailable,
+    #[error("no track matches {0:?}")]
+    NotFound(String),
 }
 
 /// Outbound port: one voice connection and track queue per guild.

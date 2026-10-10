@@ -38,6 +38,7 @@ flowchart LR
 | `ecr.tf` | ECR `tatarbot-discord`, `tatarbot-runtime` (immutable tags, scan on push, lifecycle: 20 images, untagged 7 days) |
 | `ecs.tf` | Cluster (Fargate only), log groups, initial task definitions, services `tatarbot-discord` and `tatarbot-runtime` |
 | `iam.tf` | Per-service execution roles (own image, own log group, own secrets only), GitHub OIDC provider + deploy role |
+| `music.tf` | Only with `music_library_enabled`: private S3 bucket for library audio (public access blocked, TLS only, SSE-S3), the bot's task role (get/put/delete under `music_library_prefix`, list that prefix) |
 | `budget.tf` | Monthly budget with email alerts (only if `budget_email` is set) |
 
 ## Networking and service discovery
@@ -100,6 +101,9 @@ terraform apply                                # services start with desired cou
    aws ssm put-parameter --type SecureString --name /tatarbot/runtime/MODEL_API_KEY --value "$MODEL_API_KEY"
    # Web search (skip, and set web_search_enabled = false, to run without it)
    aws ssm put-parameter --type SecureString --name /tatarbot/runtime/TAVILY_API_KEY --value "$TAVILY_API_KEY"
+   # Music library, only with music_library_enabled = true (Supabase, session mode, verified TLS;
+   # see discord_bot/README.md):
+   aws ssm put-parameter --type SecureString --name /tatarbot/discord/DATABASE_URL --value "$DATABASE_URL"
    ```
 
 2. **Configure GitHub**: create the `production` environment (add required reviewers) and set

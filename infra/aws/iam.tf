@@ -1,7 +1,8 @@
 # Least-privilege roles.
 #
 # * One execution role per service: pull its own image, write its own logs, read only its
-#   own secrets. No task roles: neither application calls AWS APIs.
+#   own secrets. The runtime has no task role (it calls no AWS API); the bot gets one only
+#   with the music library, scoped to its bucket prefix (music.tf).
 # * One deploy role for GitHub Actions (OIDC, no stored keys), trusted only for the
 #   configured repository *and* GitHub environment.
 
@@ -14,6 +15,7 @@ locals {
     agent_api_key  = "${var.ssm_prefix}/shared/AGENT_API_KEY"
     model_api_key  = "${var.ssm_prefix}/runtime/MODEL_API_KEY"
     tavily_api_key = "${var.ssm_prefix}/runtime/TAVILY_API_KEY"
+    database_url   = "${var.ssm_prefix}/discord/DATABASE_URL"
   }
   secret_arns = {
     for k, name in local.secret_names :
@@ -21,7 +23,10 @@ locals {
   }
 
   service_secrets = {
-    discord = [local.secret_arns.discord_token, local.secret_arns.agent_api_key]
+    discord = concat(
+      [local.secret_arns.discord_token, local.secret_arns.agent_api_key],
+      var.music_library_enabled ? [local.secret_arns.database_url] : [],
+    )
     runtime = concat(
       [local.secret_arns.agent_api_key, local.secret_arns.model_api_key],
       var.web_search_enabled ? [local.secret_arns.tavily_api_key] : [],
@@ -166,9 +171,9 @@ data "aws_iam_policy_document" "deploy" {
     resources = [for s in local.ecs_services : s.id]
   }
   statement {
-    sid       = "PassExecutionRoles"
+    sid       = "PassServiceRoles"
     actions   = ["iam:PassRole"]
-    resources = [for r in aws_iam_role.execution : r.arn]
+    resources = concat([for r in aws_iam_role.execution : r.arn], aws_iam_role.discord_task[*].arn)
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"

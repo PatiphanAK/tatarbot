@@ -6,18 +6,33 @@ use serenity::all::{
 };
 use serenity::async_trait;
 
-use super::{convert, music, presenter};
-use crate::application::ports::{ChatService, MusicService};
+use super::{convert, library, music, presenter};
+use crate::application::ports::{ChatService, LibraryService, MusicService};
 use crate::domain::ChatRequest;
+
+/// The server library and who may manage it (role name, per server).
+pub struct LibraryCommands {
+    pub service: Arc<dyn LibraryService>,
+    pub upload_role: String,
+}
 
 pub struct Handler {
     chat: Arc<dyn ChatService>,
     music: Arc<dyn MusicService>,
+    library: Option<LibraryCommands>,
 }
 
 impl Handler {
-    pub fn new(chat: Arc<dyn ChatService>, music: Arc<dyn MusicService>) -> Self {
-        Self { chat, music }
+    pub fn new(
+        chat: Arc<dyn ChatService>,
+        music: Arc<dyn MusicService>,
+        library: Option<LibraryCommands>,
+    ) -> Self {
+        Self {
+            chat,
+            music,
+            library,
+        }
     }
 }
 
@@ -25,14 +40,25 @@ impl Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!(user = %ready.user.name, "connected to Discord");
-        register_slash_commands(&ctx, &ready, self.music.as_ref()).await;
+        register_slash_commands(&ctx, &ready, self.music.as_ref(), self.library.is_some()).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Command(cmd) = interaction
-            && music::is_music_command(&cmd.data.name)
-        {
-            music::handle(&ctx, &cmd, self.music.as_ref()).await;
+        match interaction {
+            Interaction::Command(cmd) if music::is_music_command(&cmd.data.name) => {
+                music::handle(&ctx, &cmd, self.music.as_ref()).await;
+            }
+            Interaction::Command(cmd) if library::is_library_command(&cmd.data.name) => {
+                if let Some(lib) = &self.library {
+                    library::handle(&ctx, &cmd, lib.service.as_ref(), &lib.upload_role).await;
+                }
+            }
+            Interaction::Autocomplete(cmd) => {
+                if let Some(lib) = &self.library {
+                    library::autocomplete(&ctx, &cmd, lib.service.as_ref()).await;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -102,8 +128,16 @@ async fn respond(ctx: &Context, msg: &Message, bot_id: UserId, chat: &dyn ChatSe
 /// Replaces the global commands with the music commands (bulk overwrite, so
 /// the old `/chat` disappears too), and removes guild-level leftovers from
 /// earlier versions so commands don't show up twice.
-async fn register_slash_commands(ctx: &Context, ready: &Ready, music: &dyn MusicService) {
-    let commands = music::commands(music.stations());
+async fn register_slash_commands(
+    ctx: &Context,
+    ready: &Ready,
+    music: &dyn MusicService,
+    with_library: bool,
+) {
+    let mut commands = music::commands(music.stations(), with_library);
+    if with_library {
+        commands.extend(library::commands());
+    }
     match Command::set_global_commands(&ctx.http, commands).await {
         Ok(registered) => tracing::info!(count = registered.len(), "registered slash commands"),
         Err(err) => tracing::warn!(%err, "failed to register slash commands"),

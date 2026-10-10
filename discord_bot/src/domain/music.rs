@@ -119,6 +119,9 @@ impl StationList {
 pub enum TrackSource {
     /// An HTTP(S) audio file or live stream, fetched when the track starts.
     Http(Url),
+    /// An Ogg Opus object in the server library's bucket. The voice adapter
+    /// presigns it when the track starts, so a long queue can't outlive the URL.
+    Library { key: String },
 }
 
 /// What is shown about a track, without how to fetch it.
@@ -137,6 +140,21 @@ pub struct Track {
 }
 
 impl Track {
+    pub fn from_library(
+        track: &super::library::LibraryTrack,
+        key: String,
+        requested_by: UserId,
+    ) -> Self {
+        Self {
+            info: TrackInfo {
+                title: track.title.clone(),
+                live: false,
+                requested_by,
+            },
+            source: TrackSource::Library { key },
+        }
+    }
+
     pub fn from_station(station: &Station, requested_by: UserId) -> Self {
         Self {
             info: TrackInfo {

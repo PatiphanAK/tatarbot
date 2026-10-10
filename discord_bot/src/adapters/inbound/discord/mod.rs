@@ -6,8 +6,11 @@
 
 mod convert;
 mod handler;
+mod library;
 mod music;
 mod presenter;
+
+pub use handler::LibraryCommands;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +31,7 @@ pub async fn run(
     config: DiscordConfig,
     chat: Arc<dyn ChatService>,
     music: Arc<dyn MusicService>,
+    library: Option<LibraryCommands>,
     voice: Arc<Songbird>,
 ) -> Result<(), AppError> {
     // MESSAGE_CONTENT (privileged) is required to read replies to the bot
@@ -41,7 +45,7 @@ pub async fn run(
         | GatewayIntents::GUILD_VOICE_STATES;
 
     let mut client = Client::builder(&config.token, intents)
-        .event_handler(handler::Handler::new(chat, music))
+        .event_handler(handler::Handler::new(chat, music, library))
         .register_songbird_with(voice.clone())
         .await?;
 
