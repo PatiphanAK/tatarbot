@@ -1,5 +1,7 @@
 # Model inference (vLLM)
 
+Part of [TatarBot](../README.md): the model the [agent runtime](../agent_runtime/) calls.
+
 The Agent Runtime calls any OpenAI-compatible Chat Completions endpoint
 (`agent_runtime/src/agent_runtime/adapters/outbound/vllm.py`). This directory has the two
 ways TatarBot serves that endpoint with vLLM, and a smoke test that calls it exactly as the
