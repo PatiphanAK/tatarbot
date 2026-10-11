@@ -23,7 +23,8 @@ impl<A: AgentPort> ChatService for ChatUseCase<A> {
 
         let response = self.agent.chat(request).await?;
 
-        if response.message.trim().is_empty() {
+        // An empty message is fine when the agent asked for actions instead.
+        if response.message.trim().is_empty() && response.actions.is_empty() {
             return Err(ChatError::EmptyReply);
         }
         if response.conversation_id != conversation_id {
@@ -37,6 +38,7 @@ impl<A: AgentPort> ChatService for ChatUseCase<A> {
         Ok(ChatResponse {
             message: response.message,
             conversation_id,
+            actions: response.actions,
         })
     }
 }
@@ -85,6 +87,7 @@ mod tests {
         let agent = FakeAgent::returning(Ok(ChatResponse {
             message: "hi there".into(),
             conversation_id: conv("c1"),
+            actions: vec![],
         }));
         let use_case = ChatUseCase::new(agent);
 
@@ -100,6 +103,7 @@ mod tests {
         let agent = FakeAgent::returning(Ok(ChatResponse {
             message: "hi".into(),
             conversation_id: conv("other"),
+            actions: vec![],
         }));
 
         let response = ChatUseCase::new(agent).chat(request()).await.unwrap();
@@ -112,11 +116,25 @@ mod tests {
         let agent = FakeAgent::returning(Ok(ChatResponse {
             message: "  ".into(),
             conversation_id: conv("c1"),
+            actions: vec![],
         }));
 
         let err = ChatUseCase::new(agent).chat(request()).await.unwrap_err();
 
         assert!(matches!(err, ChatError::EmptyReply));
+    }
+
+    #[tokio::test]
+    async fn an_empty_reply_with_actions_is_fine() {
+        let agent = FakeAgent::returning(Ok(ChatResponse {
+            message: "".into(),
+            conversation_id: conv("c1"),
+            actions: vec![crate::domain::ChatAction::Skip],
+        }));
+
+        let response = ChatUseCase::new(agent).chat(request()).await.unwrap();
+
+        assert_eq!(response.actions, [crate::domain::ChatAction::Skip]);
     }
 
     #[tokio::test]

@@ -3,7 +3,8 @@
 TatarBot is a Discord bot for one community. Mention it and it answers through an LLM
 agent that can search the web and replies in Thai or English, whichever you wrote in. In a
 voice channel it plays curated radio stations, direct audio links, and a per-server library
-of audio that members upload. This README explains how those pieces work and why they are
+of audio that members upload, through slash commands or just by asking in chat
+("@TatarBot เปิดเพลงชิลๆ หน่อย"). This README explains how those pieces work and why they are
 built the way they are; each directory's README covers configuration and day-to-day use.
 
 ## Architecture
@@ -15,6 +16,7 @@ flowchart LR
     subgraph bot["discord_bot (Rust)"]
         slash["Slash commands<br/>/radio /play /queue …"] --> music[MusicService]
         mention["@mention chat"] --> chat[ChatService]
+        chat -- "actions (play_music)" --> music
         music --> resolver[TrackResolver]
         resolver --> radio["Radio<br/>stations.toml"]
         resolver --> link["Direct URL<br/>SSRF-guarded"]
@@ -63,7 +65,9 @@ Two entry points, deliberately separate:
   (`discord_bot/src/adapters/inbound/discord/respond.rs`, `music.rs`, `library.rs`).
   Results are public; refusals are ephemeral.
 * **@mention chat** goes to `ChatService`, which calls the runtime's `POST /v1/chat`. The
-  bot knows nothing about models.
+  bot knows nothing about models. In a server it also offers its stations as a client-side
+  tool; any `actions` that come back are carried out through `MusicService`
+  (`discord_bot/src/adapters/inbound/discord/chat_actions.rs`).
 
 All playback rules live in one place, `MusicUseCase`
 (`discord_bot/src/application/use_cases/music.rs`): you must be in a voice channel, controls
@@ -71,9 +75,9 @@ need you in the bot's channel, the bot never leaves listeners mid-track for anot
 `/radio` replaces the queue, the queue is capped. The commands are thin adapters that pass
 plain values (server, user, voice channel) in.
 
-*Why:* music keeps working when the runtime or the model is down, and a second caller
-can reuse the same rules unchanged. That caller is planned: chat control of music (Phase 2,
-below) will call the same `MusicService`.
+*Why:* music keeps working when the runtime or the model is down, and chat control reuses
+the same rules unchanged: "play lofi" in chat and `/radio lofi` end in the same call, with
+the same checks (you must be in a voice channel, the station must exist).
 
 ### 2. Playback pipeline
 
@@ -169,9 +173,12 @@ and each one fails if its lock is removed.
   redacted. Search results are passed to the model as untrusted content.
 * **Secrets** live in SSM Parameter Store and `.env` files only; TLS to Supabase is
   verified against its root CA (`sslmode=verify-full`).
-* *Planned with Phase 2:* chat-controlled music where the model's tool arguments are an enum
-  of station names and actions, so even a successful prompt injection can only pick from the
-  list.
+* **Enum-only tool arguments:** the `play_music` tool's `station` is an enum of the stations
+  the bot sent, and `action` is one of play, skip, stop, queue. Arguments outside that are
+  dropped by the runtime, unknown actions by the bot, and the bot runs at most 2 actions per
+  message. Even a successful prompt injection can only pick a listed station; it can't make
+  the bot fetch a URL, leave, or touch the library
+  (`agent_runtime/src/agent_runtime/domain/client_tools.py`).
 
 ### 7. Agent runtime
 
@@ -182,9 +189,13 @@ and each one fails if its lock is removed.
   bot's timeout. Thoughts are logged, never shown or stored.
 * **Server-side tools** run inside the runtime: today that is `web_search` (Tavily). The
   reply carries a sources footer built from the actual results.
-* *Planned (Phase 2): client-side tools.* A `play_music` tool that the runtime does not run:
-  it returns the call in a new `actions` field of `/v1/chat`, and the bot validates it (in
-  a voice channel? known station?) and calls `MusicService`. The runtime never calls the bot.
+* **Client-side tools** run in the caller, not the runtime. The bot sends what it supports
+  in `client_tools` (its station list); the reason step may choose `Next: MUSIC`, the act step
+  then offers only `play_music`, and a valid call ends the turn without another model call:
+  it comes back in the `actions` field of `/v1/chat`. The bot carries it out; if an action
+  fails (not in a voice channel), it shows the real error instead of the model's text, which
+  might claim success. History stores a neutral note (`[music: play lofi]`). The runtime
+  never calls the bot, and both fields are optional, so older bots and runtimes still work.
 * **Language:** each message is classified as Thai or English by script, and the system
   message tells the model which language to reply in
   (`agent_runtime/src/agent_runtime/domain/language.py`).
@@ -220,6 +231,7 @@ Design records: [ADR 0001](docs/adr/0001-inference-provider.md) and
 | Library search (database round trip) | 2.7–8.8 ms | `EXPLAIN ANALYZE` of the search query on 100,000 synthetic tracks across 100 servers (1,000 per server), local Postgres 17 |
 | Command to first audio | not measured yet | `discord_bot/scripts/timing_report.py` turns the `tatarbot::timing` debug log of a session into these numbers |
 | Autocomplete reply time | not measured yet | same |
+| Chat music request to action (runtime only) | about 2.0 s (4 prompts) | Alibaba `qwen3.8-flash`: Thai "เปิดเพลงชิลๆ หน่อย" → `play chill`, "put on some jazz" → `play jazz`, "skip this song" → `skip`, a maths question → no action; two model calls each (reason + act) |
 
 ## Run and test
 
@@ -245,8 +257,6 @@ Each directory's README has the configuration and details: [discord_bot](discord
 ## Status and plans
 
 Built: chat with the agent runtime, radio, direct links, the server library, fuzzy search,
-CI, and the AWS Terraform (not applied).
-
-Planned, Phase 2: controlling music from chat ("@TatarBot play some lofi") through a
-client-side `play_music` tool limited to station names and skip/stop/queue, returned in an
-`actions` field of `/v1/chat` and carried out by the bot through the same `MusicService`.
+music control from chat (stations, skip, stop, queue), CI, and the AWS Terraform (not
+applied). Not yet: playing library tracks or links from chat (the tool covers stations only,
+by design), and the audio latency measurements above.

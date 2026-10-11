@@ -10,9 +10,10 @@ use std::panic::AssertUnwindSafe;
 
 use futures::FutureExt;
 
-use super::{convert, library, music, presenter, respond};
-use crate::application::ports::{ChatService, LibraryService, MusicService};
+use super::{chat_actions, convert, library, music, presenter, respond};
+use crate::application::ports::{ChatService, LibraryService, MusicService, PlayContext};
 use crate::domain::ChatRequest;
+use crate::domain::music::{GuildId, UserId as MusicUserId};
 
 /// The server library and who may manage it (role name, per server).
 pub struct LibraryCommands {
@@ -54,7 +55,7 @@ impl EventHandler for Handler {
         if !is_addressed_to_bot(&msg, bot_id) {
             return;
         }
-        respond(&ctx, &msg, bot_id, self.chat.as_ref()).await;
+        respond(&ctx, &msg, bot_id, self.chat.as_ref(), self.music.as_ref()).await;
     }
 
     /// A panic in a command must not leave the caller with "TatarBot is
@@ -126,23 +127,58 @@ fn should_respond(
     !author_is_bot && (mentions_bot || replied_to == Some(bot_id))
 }
 
-async fn respond(ctx: &Context, msg: &Message, bot_id: UserId, chat: &dyn ChatService) {
+async fn respond(
+    ctx: &Context,
+    msg: &Message,
+    bot_id: UserId,
+    chat: &dyn ChatService,
+    music: &dyn MusicService,
+) {
     let text = convert::strip_bot_mention(&msg.content, bot_id);
     let conversation_id = convert::conversation_id(msg.guild_id, msg.channel_id, msg.author.id);
 
     // Show "Bot is typing…" until the reply is sent (stops when dropped).
     let typing = msg.channel_id.start_typing(&ctx.http);
 
-    let chunks = match ChatRequest::new(text, conversation_id) {
+    let messages = match ChatRequest::new(text, conversation_id) {
         Err(_) => vec![presenter::EMPTY_PROMPT.to_owned()],
-        Ok(request) => match chat.chat(request).await {
-            Ok(response) => presenter::split_message(&response.message),
-            Err(err) => {
-                tracing::warn!(error = ?err, "chat failed");
-                vec![presenter::error_message(&err)]
+        Ok(request) => {
+            // Music control is offered only in servers (there is no voice in DMs).
+            let request = match msg.guild_id {
+                Some(_) => request.with_client_tools(chat_actions::offer(music)),
+                None => request,
+            };
+            match chat.chat(request).await {
+                Ok(response) => {
+                    let results = match msg.guild_id {
+                        Some(guild_id) if !response.actions.is_empty() => {
+                            let play_ctx = PlayContext {
+                                guild: GuildId(guild_id.get()),
+                                user: MusicUserId(msg.author.id.get()),
+                                user_channel: music::user_voice_channel(
+                                    ctx,
+                                    guild_id,
+                                    msg.author.id,
+                                )
+                                .await,
+                            };
+                            chat_actions::execute(music, play_ctx, &response.actions).await
+                        }
+                        _ => Vec::new(),
+                    };
+                    chat_actions::compose(&response.message, &results)
+                }
+                Err(err) => {
+                    tracing::warn!(error = ?err, "chat failed");
+                    vec![presenter::error_message(&err)]
+                }
             }
-        },
+        }
     };
+    let chunks: Vec<String> = messages
+        .iter()
+        .flat_map(|m| presenter::split_message(m))
+        .collect();
 
     for chunk in chunks {
         // Plain channel message (not a reply); agent output never pings anyone.

@@ -7,7 +7,8 @@ POST /v1/chat/completions  -> a reply that echoes the last user message and coun
                               must strip.
 
 Magic user messages trigger failures: "__fail_500__" (HTTP 500), "__bad_json__" (200 with a
-non-OpenAI body), "__slow__" (sleeps MOCK_SLOW_SECONDS). If MOCK_API_KEY is set, requests
+non-OpenAI body), "__slow__" (sleeps MOCK_SLOW_SECONDS). "__play_lofi__" answers with a
+play_music tool call if that tool was offered, else plain text. If MOCK_API_KEY is set, requests
 must send `Authorization: Bearer <key>`. Standard library only.
 """
 
@@ -52,6 +53,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"status": "IN_QUEUE"})
         if last_user == "__slow__":
             time.sleep(SLOW_SECONDS)
+        if last_user == "__play_lofi__":
+            offered = [t["function"]["name"] for t in body.get("tools", [])]
+            if "play_music" in offered:
+                call = {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "play_music",
+                        "arguments": json.dumps({"action": "play", "station": "lofi"}),
+                    },
+                }
+                message = {"role": "assistant", "content": None, "tool_calls": [call]}
+                return self._send(
+                    200,
+                    {
+                        "id": "chatcmpl-mock",
+                        "object": "chat.completion",
+                        "model": MODEL,
+                        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+                    },
+                )
 
         user_turns = sum(1 for m in messages if m["role"] == "user")
         content = f"<think>hidden reasoning</think>mock reply #{user_turns}: {last_user}"

@@ -57,6 +57,21 @@ On only with `TAVILY_API_KEY`; without it a turn is one plain model call with no
 * Logs: `react thought ... decision=search query=...` per step, and `react_steps`,
   `searches`, `model_calls` per turn.
 
+## Client-side tools (music)
+
+The caller may send `client_tools.music.stations` (1–25, unique `a-z0-9-` names, titles up
+to 100 characters). The model is then offered `play_music` with `action` ∈ play, skip, stop,
+queue and `station` ∈ the names sent, and the system message gains short music rules
+(reply in one sentence, never claim it's playing). With web search on, the reason step can
+choose `Next: MUSIC`, and only then is `play_music` offered, never next to `web_search`
+after a `SEARCH` decision.
+
+A valid call ends the turn with no further model call and is returned in `actions`;
+invalid arguments are dropped (logged) and the model is asked to answer instead. The
+runtime never runs these tools and never calls the bot. `message` may be empty when there
+are actions; history stores `[music: <action> <station>]` so the conversation keeps
+context without claiming success (`domain/client_tools.py`, `application/agent.py`).
+
 ## System prompt, reply language, guardrails
 
 The system prompt is `src/agent_runtime/prompts/system.md` (TatarBot persona, language,
@@ -87,7 +102,7 @@ classifier model behind its own port would be the next step.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/v1/chat` | Bearer | `{message, conversation_id}` → `{message, conversation_id}` |
+| `POST` | `/v1/chat` | Bearer | `{message, conversation_id, client_tools?}` → `{message, conversation_id, actions}` |
 | `GET` | `/health` | – | Liveness: the process is up |
 | `GET` | `/ready` | – | Readiness: the backend is reachable and serves `MODEL_NAME` (otherwise 503) |
 

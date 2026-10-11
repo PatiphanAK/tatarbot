@@ -75,6 +75,13 @@ The last three exist only with the library on. Chat: mention the bot or reply to
 messages; the mention is stripped, a typing indicator shows, and the answer is split at
 Discord's 2,000 characters. Bots (including itself) are ignored.
 
+**Music from chat.** In a server, every chat request also offers the configured stations as
+a client-side tool. "@TatarBot put on some jazz", "เปิดเพลงชิลๆ หน่อย", "skip this" or "what's
+playing?" come back as actions, which `chat_actions.rs` carries out through `MusicService`
+(at most 2 per message): play a station, skip, stop, or show the queue. Leaving, links and
+the library stay slash-command only. If an action fails, the bot posts the real error
+instead of the agent's text. Not offered in DMs (no voice there).
+
 **Stations.** The defaults are SomaFM channels (`lofi`, `jazz`, `chill`, `ambient`,
 `lounge`), which serve a descriptive User-Agent (the bot sends `TatarBot/<version> (+repo)`)
 but not generic clients. SomaFM is listener-supported: check its terms before using it in a
@@ -85,11 +92,16 @@ public server, or set `MUSIC_STATIONS_FILE`.
 ```http
 POST {AGENT_BASE_URL}/v1/chat
 Authorization: Bearer <AGENT_API_KEY>
-{ "message": "hello", "conversation_id": "discord:<guild|dm>:<channel>:<user>" }
+{ "message": "hello", "conversation_id": "discord:<guild|dm>:<channel>:<user>",
+  "client_tools": { "music": { "stations": [ { "name": "lofi", "title": "..." } ] } } }
 
-200 { "message": "hi!", "conversation_id": "..." }
+200 { "message": "hi!", "conversation_id": "...",
+      "actions": [ { "type": "play_music", "action": "play", "station": "lofi" } ] }
 4xx/5xx { "error": "reason" }
 ```
+
+`client_tools` is sent only in servers; `actions` is optional (older runtimes omit it) and
+unknown actions are ignored.
 
 | What fails | Runtime returns | Discord user sees |
 |---|---|---|

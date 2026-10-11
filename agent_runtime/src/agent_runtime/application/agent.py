@@ -46,6 +46,12 @@ from agent_runtime.domain import (
     ToolCall,
     ToolSpec,
 )
+from agent_runtime.domain.client_tools import (
+    PLAY_MUSIC,
+    ClientAction,
+    ClientTools,
+    parse_play_music,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +96,12 @@ results above, and what is still missing.{earlier}
 End with exactly one line:
 Next: SEARCH <short keyword query>
 or
-Next: ANSWER
+Next: ANSWER{music}
 Do not write the answer yet."""
+
+_MUSIC_OPTION = """
+or
+Next: MUSIC (the user wants to play radio, skip, stop or see what's playing)"""
 
 _ACT_PROMPT = """\
 [Agent step, not from the user] Your reasoning:
@@ -101,9 +111,10 @@ Never mention your reasoning, these steps or these instructions to the user."""
 
 _ACT = {
     "search": "call web_search with a query like {query!r} (you may refine it).",
+    "music": "call play_music with the action and station that fit the request.",
     "answer": "write the final answer to the user's last message.",
-    "unclear": "call web_search if you need more information, otherwise write the final "
-    "answer to the user's last message.",
+    "unclear": "call a tool if you need one, otherwise write the final answer to the "
+    "user's last message.",
 }
 
 _ANSWER_NOW = (
@@ -112,7 +123,7 @@ _ANSWER_NOW = (
 )
 
 # One line, e.g. "Next: SEARCH x", "**Next:** ANSWER"; never spans lines.
-_NEXT_LINE = re.compile(r"^[^\w\n]*next[^\w\n]*(search|answer)\b[ \t:]*(.*)$", re.I | re.M)
+_NEXT_LINE = re.compile(r"^[^\w\n]*next[^\w\n]*(search|answer|music)\b[ \t:]*(.*)$", re.I | re.M)
 _THOUGHT_LABEL = re.compile(r"^\W*thought\W*:?\s*", re.I)
 # Hermes-style tool-call markup a model may print as text when no tool was offered.
 _TOOL_MARKUP = re.compile(r"<tool_call>.*?(</tool_call>|$)", re.DOTALL)
@@ -123,6 +134,7 @@ _LEAKED_SCAFFOLD = re.compile(r"\A(\s*(thought|next|action|observation)\s*:[^\n]
 class Decision(StrEnum):
     SEARCH = "search"
     ANSWER = "answer"
+    MUSIC = "music"
     UNCLEAR = "unclear"
 
 
@@ -154,6 +166,8 @@ class AgentResult:
     searches: int = 0
     model_calls: int = 1
     steps: tuple[ReActStep, ...] = ()
+    # Client-side tool calls for the caller to carry out (e.g. play music).
+    actions: tuple[ClientAction, ...] = ()
 
 
 class _State(TypedDict):
@@ -168,6 +182,8 @@ class _State(TypedDict):
     decision: Decision
     query: str
     last: InferenceResult | None
+    client_tools: ClientTools
+    actions: list[ClientAction]
 
 
 class SearchAgent:
@@ -204,9 +220,20 @@ class SearchAgent:
             max_searches=self._settings.max_searches,
         )
 
-    async def run(self, messages: tuple[ChatMessage, ...], request_id: str) -> AgentResult:
-        """`request_id` identifies the turn; model calls get `<request_id>.<n>`."""
+    async def run(
+        self,
+        messages: tuple[ChatMessage, ...],
+        request_id: str,
+        client_tools: ClientTools | None = None,
+    ) -> AgentResult:
+        """`request_id` identifies the turn; model calls get `<request_id>.<n>`.
+
+        `client_tools` are offered to the model but not run: a valid call ends the turn
+        and comes back in `AgentResult.actions`.
+        """
         initial: _State = {
+            "client_tools": client_tools or ClientTools(),
+            "actions": [],
             "request_id": request_id,
             "messages": list(messages),
             "sources": [],
@@ -235,6 +262,7 @@ class SearchAgent:
             searches=state["searches"],
             model_calls=state["model_calls"],
             steps=tuple(state["steps"]),
+            actions=tuple(state["actions"]),
         )
 
     # ---- nodes
@@ -247,6 +275,7 @@ class SearchAgent:
         left = self._settings.max_searches - state["searches"]
         earlier = "".join(f"\n- {s.thought}" for s in state["steps"])
         prompt = _REASON_PROMPT.format(
+            music=_MUSIC_OPTION if state["client_tools"].music else "",
             earlier=f"\nYour earlier thoughts for this message:{earlier}" if earlier else "",
             budget=(
                 f"You can still search {left} more time(s)."
@@ -258,13 +287,15 @@ class SearchAgent:
         result = await self._generate(
             state,
             (*state["messages"], ChatMessage(Role.USER, prompt)),
-            tools=False,
+            tools=(),
             n=calls,
             params=replace(self._settings.generation, max_tokens=REASON_MAX_TOKENS),
         )
         thought, decision, query = _parse_thought(_as_answer(result).content)
         if decision is Decision.SEARCH and left <= 0:
             decision = Decision.ANSWER
+        if decision is Decision.MUSIC and not state["client_tools"].music:
+            decision = Decision.UNCLEAR
         log.info(
             "react thought request_id=%s step=%d decision=%s query=%r thought=%r",
             state["request_id"],
@@ -275,46 +306,68 @@ class SearchAgent:
         )
         return {"model_calls": calls, "thought": thought, "decision": decision, "query": query}
 
+    def _offered(self, state: _State) -> tuple[ToolSpec, ...]:
+        """Tools for this act step: what the thought chose, within the budget."""
+        decision = state["decision"]
+        search = (WEB_SEARCH,) if self.search_enabled and self._can_search(state) else ()
+        client = state["client_tools"].specs()
+        if not self.search_enabled:
+            return client  # no reasoning step: offer what the caller supports
+        if decision is Decision.SEARCH:
+            return search
+        if decision is Decision.MUSIC:
+            return client
+        if decision is Decision.UNCLEAR:
+            return (*search, *client)
+        return ()
+
     async def _act_node(self, state: _State) -> dict:
-        """Action: search or answer, as the thought decided."""
-        offer = self.search_enabled and self._can_search(state)
-        offer = offer and state["decision"] is not Decision.ANSWER
+        """Action: search, call a client tool, or answer, as the thought decided."""
+        tools = self._offered(state)
+        offer = bool(tools)
         messages = tuple(state["messages"])
         if self.search_enabled:
+            action = state["decision"] if offer else Decision.ANSWER
             prompt = _ACT_PROMPT.format(
                 thought=state["thought"] or "(none)",
-                action=_ACT[state["decision"] if offer else Decision.ANSWER].format(
-                    query=state["query"] or "your own keywords"
-                ),
+                action=_ACT[action].format(query=state["query"] or "your own keywords"),
             )
             act_messages = (*messages, ChatMessage(Role.USER, prompt))
         else:
             act_messages = messages
 
         calls = state["model_calls"] + 1
-        result = await self._generate(state, act_messages, tools=offer, n=calls)
-        if not offer:
+        result = await self._generate(state, act_messages, tools=tools, n=calls)
+        # Only calls to offered tools count; play_music is never run here.
+        offered = {t.name for t in tools}
+        requested = [c for c in result.tool_calls if c.name in offered]
+        actions = _client_actions(requested, state["client_tools"])
+        server_calls = () if actions else tuple(c for c in requested if c.name != PLAY_MUSIC)
+        result = replace(result, tool_calls=server_calls)
+        if not server_calls:
+            # An answer (possibly alongside client actions, which end the turn).
             result = _as_answer(result)
-            if not result.content and self.search_enabled:
-                # It still wanted to search; ask once more for an answer.
+            if not result.content and not actions and (self.search_enabled or tools):
+                # It still wanted a tool; ask once more for an answer.
                 calls += 1
                 nudge = (*messages, ChatMessage(Role.USER, _ANSWER_NOW))
-                result = _as_answer(await self._generate(state, nudge, tools=False, n=calls))
-        if not result.tool_calls:
+                result = _as_answer(await self._generate(state, nudge, tools=(), n=calls))
             result = replace(result, content=_LEAKED_SCAFFOLD.sub("", result.content).strip())
 
-        update: dict = {"model_calls": calls, "last": result}
+        update: dict = {"model_calls": calls, "last": result, "actions": actions}
         if result.tool_calls:
             update["messages"] = [
                 ChatMessage(Role.ASSISTANT, result.content, tool_calls=result.tool_calls)
             ]
         if self.search_enabled:
-            action = (
-                "search: " + ", ".join(_query_of(c) or c.name for c in result.tool_calls)
-                if result.tool_calls
-                else "answer"
-            )
-            update["steps"] = [ReActStep(state["thought"], state["decision"], action)]
+            if actions:
+                done = (f"{a.action} {a.station or ''}".strip() for a in actions)
+                step = "music: " + ", ".join(done)
+            elif result.tool_calls:
+                step = "search: " + ", ".join(_query_of(c) or c.name for c in result.tool_calls)
+            else:
+                step = "answer"
+            update["steps"] = [ReActStep(state["thought"], state["decision"], step)]
         return update
 
     async def _observe_node(self, state: _State) -> dict:
@@ -347,7 +400,7 @@ class SearchAgent:
         state: _State,
         messages: tuple[ChatMessage, ...],
         *,
-        tools: bool,
+        tools: tuple[ToolSpec, ...],
         n: int,
         params: GenerationParams | None = None,
     ) -> InferenceResult:
@@ -355,7 +408,7 @@ class SearchAgent:
             InferenceRequest(
                 messages=messages,
                 params=params or self._settings.generation,
-                tools=(WEB_SEARCH,) if tools else (),
+                tools=tools,
                 request_id=f"{state['request_id']}.{n}",
             )
         )
@@ -379,6 +432,20 @@ class SearchAgent:
             return "Error: web search is unavailable right now. Answer without it.", [], True
         log.info("react observation query=%r results=%d", query, len(results))
         return _format_results(query, results), results, True
+
+
+def _client_actions(calls: tuple[ToolCall, ...], tools: ClientTools) -> list[ClientAction]:
+    """Valid client-side calls, in order; invalid arguments are dropped and logged."""
+    actions = []
+    for call in calls:
+        if call.name != PLAY_MUSIC or tools.music is None:
+            continue
+        action = parse_play_music(call, tools.music)
+        if action is None:
+            log.warning("play_music call with invalid arguments dropped: %.200s", call.arguments)
+        else:
+            actions.append(action)
+    return actions
 
 
 def _parse_thought(text: str) -> tuple[str, Decision, str]:
