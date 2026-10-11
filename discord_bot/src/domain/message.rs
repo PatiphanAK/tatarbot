@@ -5,6 +5,31 @@ use super::{ConversationId, DomainError};
 pub struct ChatRequest {
     pub message: String,
     pub conversation_id: ConversationId,
+    /// What the bot can carry out if the agent asks (empty: nothing).
+    pub client_tools: ClientTools,
+}
+
+/// Client-side tools offered to the agent. The agent never runs them: it returns
+/// `ChatAction`s, which the bot validates and carries out itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientTools {
+    /// Radio stations the agent may pick from (empty: no music control).
+    pub music_stations: Vec<StationOffer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StationOffer {
+    pub name: String,
+    pub title: String,
+}
+
+/// Something the agent asked the bot to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    PlayStation(String),
+    Skip,
+    Stop,
+    Queue,
 }
 
 impl ChatRequest {
@@ -21,15 +46,23 @@ impl ChatRequest {
         Ok(Self {
             message,
             conversation_id,
+            client_tools: ClientTools::default(),
         })
+    }
+
+    pub fn with_client_tools(mut self, client_tools: ClientTools) -> Self {
+        self.client_tools = client_tools;
+        self
     }
 }
 
-/// The agent's reply within a conversation.
+/// The agent's reply within a conversation. `message` may be empty when the
+/// agent only asked for actions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatResponse {
     pub message: String,
     pub conversation_id: ConversationId,
+    pub actions: Vec<ChatAction>,
 }
 
 #[cfg(test)]

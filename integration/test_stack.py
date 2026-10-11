@@ -87,6 +87,31 @@ def backend_up():
     status, body = chat("__slow__", conversation_id="it:slow")
     check("model timeout -> 504", status == 504 and body == {"error": "model timed out"}, body)
 
+    # Client-side tools: the contract the Discord bot relies on.
+    stations = [{"name": "lofi", "title": "Lo-fi"}, {"name": "jazz", "title": "Jazz"}]
+    status, body = call(
+        "POST",
+        "/v1/chat",
+        {
+            "message": "__play_lofi__",
+            "conversation_id": "it:music",
+            "client_tools": {"music": {"stations": stations}},
+        },
+    )
+    check(
+        "music request returns an action, not text",
+        status == 200
+        and body.get("actions") == [{"type": "play_music", "action": "play", "station": "lofi"}]
+        and body.get("message") == "",
+        body,
+    )
+    status, body = chat("__play_lofi__", conversation_id="it:no-tools")
+    check(
+        "no client_tools: no tool offered, no actions",
+        status == 200 and body.get("actions") == [] and "__play_lofi__" in body.get("message", ""),
+        body,
+    )
+
     status, body = chat("after failures", conversation_id="it:fail")
     check(
         "failed turns are not stored", body.get("message") == "mock reply #1: after failures", body

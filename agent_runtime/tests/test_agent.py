@@ -220,7 +220,7 @@ async def test_unclear_thought_lets_the_model_choose():
 
     act = model.acts[0]
     assert act.tools == (WEB_SEARCH,)
-    assert "if you need more information" in act.messages[-1].content
+    assert "call a tool if you need one" in act.messages[-1].content
 
 
 async def test_budget_spent_forces_an_answer():
@@ -293,7 +293,6 @@ async def test_search_failure_is_observed_not_raised():
     [
         (ToolCall("c1", "web_search", "not json"), 'call web_search with {"query"'),
         (ToolCall("c1", "web_search", '{"query": "  "}'), 'call web_search with {"query"'),
-        (ToolCall("c1", "rm_rf", "{}"), "unknown tool 'rm_rf'"),
     ],
 )
 async def test_bad_tool_calls_get_an_error_observation(call, error):
@@ -356,3 +355,17 @@ async def test_thai_turn_gets_thai_sources_label_and_skips_cited_urls():
 )
 def test_parse_thought(text, expected):
     assert _parse_thought(text) == expected
+
+
+async def test_calls_to_tools_that_were_not_offered_are_ignored():
+    model = ReActModel(
+        thoughts=[SEARCH_THOUGHT],
+        acts=[wants(ToolCall("c1", "rm_rf", "{}")), "Here is what I know."],
+    )
+    search = FakeSearch()
+
+    reply = await service(model, search).chat("c", "hi")
+
+    assert reply == "Here is what I know."
+    assert search.queries == []
+    assert model.kinds == ["reason", "act", "act"]  # the second act is the nudge

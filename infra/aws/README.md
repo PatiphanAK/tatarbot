@@ -4,6 +4,10 @@
 no `plan` or `apply` has been run and no AWS resource exists. Applying creates billable
 resources.
 
+Why this shape (Fargate over EC2, Supabase + S3 over SQLite/EFS, one bot task) is in the
+[top-level README](../../README.md#8-deployment). The music library's resources (`music.tf`)
+are off unless `music_library_enabled = true`.
+
 ## What it creates
 
 ```mermaid
@@ -136,3 +140,18 @@ Tear down with `terraform destroy` (ECR repositories must be empty first:
 * **Failure**: the circuit breaker rolls a service back if new tasks keep failing.
 * **State**: Terraform state is local. Move it to an S3 backend before more than one
   person or a pipeline applies.
+
+## CI/CD (GitHub Actions)
+
+| Workflow | Runs when | Does |
+|---|---|---|
+| `ci-runtime.yml` | `agent_runtime/**`, `integration/**`, `compose.yaml` change | ruff, pytest, image build, integration tests |
+| `ci-discord.yml` | `discord_bot/**`, `compose.yaml` change | fmt, clippy, unit tests; library integration tests (Postgres races and search, RustFS, ffmpeg) and the `.sqlx` check; image build, startup and SIGTERM smoke tests |
+| `ci-inference.yml` | `model-inference/**` change | inference Compose config, endpoint smoke test against the mock model |
+| `ci-repo.yml` | `.github/**`, compose files, `infra/**` change | actionlint, `docker compose config`, `terraform fmt` + `validate` (offline) |
+| `deploy-runtime.yml` / `deploy-discord.yml` | manual only | via `_deploy-ecs.yml`: push a `sha-<commit>` image to ECR (skipped if it exists), register a task-definition revision, rolling ECS update |
+
+CI uses `pull_request` (not `pull_request_target`), read-only tokens and no secrets, so fork
+PRs run safely. Deploys run in the `production` GitHub environment and assume an AWS role
+through OIDC that trusts only that environment of this repository; they refuse commits that
+are not on `main`, and fail with a clear message until the AWS variables are set.

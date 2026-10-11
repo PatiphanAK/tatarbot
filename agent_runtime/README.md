@@ -1,11 +1,14 @@
-# TatarBot Agent Runtime
+# agent_runtime
 
-A small orchestration service between TatarBot and the inference backend. It owns
-conversation history and the system prompt, and turns chat turns into generic inference
-requests. It knows nothing about Discord, and its callers know nothing about the model.
+The service between the Discord bot and the model (Python, FastAPI, LangGraph). It owns
+conversation history, the system prompt, guardrails and reply language, and runs the ReAct
+web-search agent. It knows nothing about Discord; the bot knows nothing about the model. How
+the ReAct loop and the guardrails work, and why, is in the
+[top-level README](../README.md#7-agent-runtime); this page has the details.
 
 ```text
-TatarBot ──POST /v1/chat──▶ Agent Runtime ──POST /v1/chat/completions──▶ vLLM (Qwen)
+discord_bot ──POST /v1/chat──▶ agent_runtime ──POST /chat/completions──▶ any OpenAI-compatible model
+                                     └──▶ Tavily (web search, optional)
 ```
 
 ## Architecture
@@ -28,59 +31,46 @@ application/agent.py              SearchAgent: ReAct loop  reason → act ⇄ ob
 
 * `domain/inference.py` defines the generic contract: `InferenceRequest` (messages + params),
   `InferenceResult`, and `ChatMessage`. It contains no model name, URL, HTTP or Discord types.
-* `ChatService` depends only on the two ports. Possible replacements:
-  * `ModelPort`: `VLLMModel` today, later `OllamaModel`, `OpenAIModel`, or a queue/scheduler
-    adapter that hands `InferenceRequest`s to GPU workers.
-  * `ConversationStore`: in-memory today, Redis/Postgres later.
-  * HTTP inbound: could be joined by an event/queue consumer that calls the same `ChatService`.
+* `ChatService` and `SearchAgent` depend only on ports. `VLLMModel` is a plain OpenAI Chat
+  Completions client, so any compatible backend works by configuration; history is in
+  memory (`ConversationStore`), lost on restart, which is why the runtime runs one task.
 * `domain/language.py` and `domain/guardrails.py` are pure policies `ChatService` applies
   around the model call (see below).
 * `main.py` (`create_app`) is the composition root.
 
-## Web search agent (ReAct)
+## Web search agent (ReAct) details
 
-With `TAVILY_API_KEY` set, each turn runs a ReAct loop (Thought → Action → Observation),
-built as a LangGraph graph in `application/agent.py`:
+On only with `TAVILY_API_KEY`; without it a turn is one plain model call with no `tools`.
 
-```text
-START → reason ──▶ act ──web_search──▶ observe ─┐
-          ▲                                      │
-          └──────────────────────────────────────┘
-                   act ──answer──▶ END
-```
-
-* **reason (Thought)**: a short model call (≤ 256 tokens, no tools). The model writes, in
-  English, what the user wants, what it already knows and what is missing, and ends with
-  `Next: SEARCH <query>` or `Next: ANSWER`. It sees earlier thoughts and the remaining
-  budget (`SEARCH_MAX_SEARCHES`, default 3 per message).
-* **act (Action)**: carries out the thought. `web_search` is offered only when the thought
-  chose SEARCH (or was unclear) and budget remains; after `Next: ANSWER` the model must
-  answer. If it still tries to call a tool, it is asked once more to answer.
-* **observe (Observation)**: runs the searches concurrently through `SearchPort` (Tavily,
-  5 results, excerpts cut to 800 characters), adds them as tool messages marked untrusted,
-  and loops back to reason.
-
-Thoughts are internal. They are logged (`react thought ... decision=search query=...`) and
-returned in `AgentResult.steps`, but never sent to Discord or stored in history; any
-`Thought:`/`Next:` lines a model echoes at the start of its answer are removed. A turn
-log line reports `react_steps`, `searches` and `model_calls`.
-
-Cost: every search-enabled turn makes at least two model calls (reason + act), so expect
-roughly 1.5–2× latency per turn compared with plain chat, more when it searches.
-
-* The system message gains search rules and today's date.
-* The reply gets a `Sources:` / `แหล่งที่มา:` footer with up to 3 links taken from the actual
-  search results (not from the model), as `<url>` so Discord does not unfurl them.
-* History stores only the user message and the final reply: no thoughts, tool messages or
-  footer.
+* `reason` is capped at 256 tokens and sees its earlier thoughts and the remaining budget
+  (`SEARCH_MAX_SEARCHES`, default 3). An unclear thought lets the model choose; a tool call
+  after the budget is spent is answered with one "answer now" retry.
+* `observe` runs searches concurrently (Tavily, 5 results, excerpts cut to 800 characters)
+  and marks results as untrusted. A failed search becomes an observation, not an error.
+* The reply gets a `Sources:` / `แหล่งที่มา:` footer with up to 3 links from the actual
+  results, as `<url>` so Discord does not unfurl them. History keeps only the user message
+  and the final reply (no thoughts, tool messages or footer).
 * The whole turn is bounded by `TURN_TIMEOUT_SECONDS` (110 s, below the bot's 120 s) → 504.
-  Model errors keep their usual mapping; a failed search becomes an observation and the
-  model answers without it.
+* Cost: at least two model calls per turn (reason + act), roughly 1.5–2× the latency of
+  plain chat. The model server must support tool calling (vLLM:
+  `--enable-auto-tool-choice --tool-call-parser hermes`; see `model-inference/`).
+* Logs: `react thought ... decision=search query=...` per step, and `react_steps`,
+  `searches`, `model_calls` per turn.
 
-The graph calls the same `ModelPort` as before (no LangChain model wrapper), so error
-mapping, guardrails and tests are unchanged. Without the key there is no reasoning step and
-no `tools`: one plain model call, exactly as before. The model server must support tool
-calling: see `model-inference/` (vLLM `--enable-auto-tool-choice --tool-call-parser hermes`).
+## Client-side tools (music)
+
+The caller may send `client_tools.music.stations` (1–25, unique `a-z0-9-` names, titles up
+to 100 characters). The model is then offered `play_music` with `action` ∈ play, skip, stop,
+queue and `station` ∈ the names sent, and the system message gains short music rules
+(reply in one sentence, never claim it's playing). With web search on, the reason step can
+choose `Next: MUSIC`, and only then is `play_music` offered, never next to `web_search`
+after a `SEARCH` decision.
+
+A valid call ends the turn with no further model call and is returned in `actions`;
+invalid arguments are dropped (logged) and the model is asked to answer instead. The
+runtime never runs these tools and never calls the bot. `message` may be empty when there
+are actions; history stores `[music: <action> <station>]` so the conversation keeps
+context without claiming success (`domain/client_tools.py`, `application/agent.py`).
 
 ## System prompt, reply language, guardrails
 
@@ -112,7 +102,7 @@ classifier model behind its own port would be the next step.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/v1/chat` | Bearer | `{message, conversation_id}` → `{message, conversation_id}` |
+| `POST` | `/v1/chat` | Bearer | `{message, conversation_id, client_tools?}` → `{message, conversation_id, actions}` |
 | `GET` | `/health` | – | Liveness: the process is up |
 | `GET` | `/ready` | – | Readiness: the backend is reachable and serves `MODEL_NAME` (otherwise 503) |
 
@@ -130,7 +120,21 @@ are never returned to the caller.
 
 ## Configuration
 
-See `.env.example`. Required: `AGENT_API_KEY`, `MODEL_BASE_URL`, `MODEL_NAME`.
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `AGENT_API_KEY` | yes | – | Bearer key the bot must send |
+| `MODEL_BASE_URL` | yes | – | OpenAI-compatible API root, e.g. `http://127.0.0.1:8000/v1` or Alibaba's `…/compatible-mode/v1` (include `https://`) |
+| `MODEL_NAME` | yes | – | Model id the backend serves (`tatarbot-chat` for `model-inference/`) |
+| `MODEL_API_KEY` | no | – | Backend bearer key |
+| `MODEL_TIMEOUT_SECONDS` | no | `100` | Per model call |
+| `MODEL_MAX_TOKENS`, `MODEL_TEMPERATURE` | no | `1024`, unset | Generation parameters |
+| `MODEL_ENABLE_THINKING` | no | `false` | Qwen3 `chat_template_kwargs.enable_thinking`; empty omits it |
+| `TAVILY_API_KEY` | no | – | Enables the web-search agent |
+| `SEARCH_MAX_SEARCHES`, `SEARCH_MAX_RESULTS`, `SEARCH_TIMEOUT_SECONDS` | no | `3`, `5`, `10` | Search budget |
+| `TURN_TIMEOUT_SECONDS` | no | `110` | Whole turn; keep below the bot's timeout |
+| `SYSTEM_PROMPT`, `SYSTEM_PROMPT_FILE` | no | `prompts/system.md` | Override the system prompt |
+| `GUARDRAILS_ENABLED` | no | `true` | Input/output guardrails |
+| `MAX_HISTORY_MESSAGES`, `MAX_CONVERSATIONS` | no | `20`, `10000` | History window and memory bound |
 
 Qwen3 is a reasoning model. By default the runtime sends
 `chat_template_kwargs.enable_thinking=false` and strips any `<think>…</think>` from replies.
