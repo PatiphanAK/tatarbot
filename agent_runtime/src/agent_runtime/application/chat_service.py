@@ -25,13 +25,29 @@ from agent_runtime.domain import (
     detect_language,
     guardrails,
 )
+from agent_runtime.domain.client_tools import ClientAction, ClientTools, describe
 from agent_runtime.domain.language import contains_thai, language_directive
 
 log = logging.getLogger(__name__)
 
 MAX_CONVERSATION_ID_LENGTH = 256
 MAX_SOURCES_SHOWN = 3
+_MUSIC_INSTRUCTIONS = """\
+Music:
+- You can control music in the user's Discord voice channel with the play_music tool: \
+play one of the listed radio stations, skip, stop, or show the queue.
+- Use it only when the user asks for music or radio; pick the station that best fits \
+(e.g. "something chill" -> chill, "เพลงแจ๊ส" -> jazz).
+- The bot carries it out and tells the user the result. Reply with at most one short \
+sentence in the user's language, and never claim the music is playing."""
 _SOURCES_LABEL = {Language.THAI: "แหล่งที่มา", Language.ENGLISH: "Sources"}
+
+
+@dataclass(frozen=True)
+class ChatReply:
+    message: str
+    # Client-side tool calls for the caller (e.g. the bot) to carry out.
+    actions: tuple[ClientAction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +90,17 @@ class ChatService:
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     async def chat(self, conversation_id: str, message: str) -> str:
+        return (await self.reply(conversation_id, message)).message
+
+    async def reply(
+        self,
+        conversation_id: str,
+        message: str,
+        client_tools: ClientTools | None = None,
+    ) -> ChatReply:
+        """A turn. `client_tools` (e.g. the bot's music) may come back as actions for the
+        caller to carry out; such a turn may have no text."""
+        client_tools = client_tools or ClientTools()
         conversation_id = conversation_id.strip()
         message = message.strip()
         if not conversation_id or len(conversation_id) > MAX_CONVERSATION_ID_LENGTH:
@@ -85,7 +112,7 @@ class ChatService:
         if guarded and (reason := guardrails.check_input(message)):
             # Refused turns never reach the model and are not stored.
             log.warning("input refused conversation_id=%s reason=%s", conversation_id, reason)
-            return guardrails.refusal(detect_language(message))
+            return ChatReply(guardrails.refusal(detect_language(message)))
 
         async with self._lock_for(conversation_id):
             history = await self._store.load(conversation_id)
@@ -93,26 +120,26 @@ class ChatService:
             language = detect_language(message) or _conversation_language(recent)
             user = ChatMessage(Role.USER, message)
             messages = (
-                ChatMessage(Role.SYSTEM, self._system_message(language)),
+                ChatMessage(Role.SYSTEM, self._system_message(language, client_tools)),
                 *recent,
                 user,
             )
             request_id = uuid4().hex
 
             started = time.perf_counter()
-            result = await self._agent.run(messages, request_id)
+            result = await self._agent.run(messages, request_id, client_tools)
             reply = result.content.strip()
-            if not reply:
+            if not reply and not result.actions:
                 raise ModelResponseError("model returned an empty reply")
 
-            if guarded:
+            if guarded and reply:
                 if guardrails.leaks_prompt(reply, self._settings.system_prompt):
                     log.warning(
                         "reply withheld conversation_id=%s request_id=%s reason=prompt_leak",
                         conversation_id,
                         request_id,
                     )
-                    return guardrails.refusal(language)
+                    return ChatReply(guardrails.refusal(language))
                 reply, redacted = guardrails.redact_secrets(reply)
                 if redacted:
                     log.warning(
@@ -122,10 +149,13 @@ class ChatService:
                         redacted,
                     )
 
-            # Only successful exchanges become history, without the sources footer.
-            await self._store.append(conversation_id, [user, ChatMessage(Role.ASSISTANT, reply)])
+            # Only successful exchanges become history, without the sources footer. A turn
+            # that only requested actions is remembered as a neutral note: whether they
+            # succeed is up to the caller.
+            stored = reply or " ".join(describe(a) for a in result.actions)
+            await self._store.append(conversation_id, [user, ChatMessage(Role.ASSISTANT, stored)])
 
-        if language is Language.THAI and not contains_thai(reply):
+        if reply and language is Language.THAI and not contains_thai(reply):
             log.warning(
                 "reply language mismatch conversation_id=%s request_id=%s expected=th",
                 conversation_id,
@@ -133,23 +163,27 @@ class ChatService:
             )
         log.info(
             "chat turn completed conversation_id=%s request_id=%s history=%d language=%s "
-            "react_steps=%d searches=%d model_calls=%d latency_ms=%d finish_reason=%s",
+            "react_steps=%d searches=%d actions=%d model_calls=%d latency_ms=%d finish_reason=%s",
             conversation_id,
             request_id,
             len(messages) - 2,
             language or "-",
             len(result.steps),
             result.searches,
+            len(result.actions),
             result.model_calls,
             round((time.perf_counter() - started) * 1000),
             result.finish_reason,
         )
-        return reply + _sources_footer(result.sources, reply, language)
+        footer = _sources_footer(result.sources, reply, language) if reply else ""
+        return ChatReply(reply + footer, result.actions)
 
-    def _system_message(self, language: Language | None) -> str:
+    def _system_message(self, language: Language | None, client_tools: ClientTools) -> str:
         parts = [self._settings.system_prompt.rstrip()]
         if search := self._agent.instructions():
             parts.append(search)
+        if client_tools.music:
+            parts.append(_MUSIC_INSTRUCTIONS)
         if language is not None:
             parts.append(language_directive(language))
         return "\n\n".join(parts)

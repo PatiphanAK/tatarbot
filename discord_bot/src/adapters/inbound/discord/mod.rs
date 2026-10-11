@@ -4,6 +4,7 @@
 //! Everything Discord-specific (IDs, intents, message limits, mention
 //! handling, error wording) stays inside this module.
 
+mod chat_actions;
 mod convert;
 mod handler;
 mod library;

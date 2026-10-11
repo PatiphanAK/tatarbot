@@ -48,7 +48,11 @@ def test_chat_returns_reply(client, model):
     response = client.post("/v1/chat", json=BODY, headers=AUTH)
 
     assert response.status_code == 200
-    assert response.json() == {"message": "reply to: Hello", "conversation_id": "discord:1:2:3"}
+    assert response.json() == {
+        "message": "reply to: Hello",
+        "conversation_id": "discord:1:2:3",
+        "actions": [],
+    }
     [request] = model.requests
     assert [(m.role, m.content) for m in request.messages] == [
         (Role.SYSTEM, SYSTEM_EN),

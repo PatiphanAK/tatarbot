@@ -153,7 +153,7 @@ pub fn since_created_ms(cmd: &CommandInteraction) -> i64 {
 /// intents) normally has it; if it doesn't (e.g. the guild isn't cached yet),
 /// ask Discord directly instead of telling the user to join a channel they
 /// are already in.
-async fn user_voice_channel(
+pub(super) async fn user_voice_channel(
     ctx: &Context,
     guild_id: serenity::all::GuildId,
     user_id: serenity::all::UserId,

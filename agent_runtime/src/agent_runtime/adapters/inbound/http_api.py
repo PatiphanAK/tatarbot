@@ -9,13 +9,13 @@ Wire contract (unchanged from TatarBot's `AgentPort` HTTP adapter):
 
 import logging
 import secrets
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agent_runtime.application import ChatService, ModelPort
 from agent_runtime.domain import (
@@ -26,20 +26,58 @@ from agent_runtime.domain import (
     ModelTimeoutError,
     ModelUnavailableError,
 )
+from agent_runtime.domain.client_tools import ClientTools, MusicTool, Station
 
 log = logging.getLogger(__name__)
 
 MAX_MESSAGE_LENGTH = 16_000
 
 
+class StationBody(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9-]{1,32}$")
+    title: str = Field(min_length=1, max_length=100)
+
+
+class MusicToolBody(BaseModel):
+    stations: list[StationBody] = Field(min_length=1, max_length=25)
+
+    @field_validator("stations")
+    @classmethod
+    def unique_names(cls, stations: list[StationBody]) -> list[StationBody]:
+        if len({s.name for s in stations}) != len(stations):
+            raise ValueError("station names must be unique")
+        return stations
+
+
+class ClientToolsBody(BaseModel):
+    """Tools the caller can carry out itself; the model may request them."""
+
+    music: MusicToolBody | None = None
+
+    def to_domain(self) -> ClientTools:
+        if self.music is None:
+            return ClientTools()
+        stations = tuple(Station(s.name, s.title) for s in self.music.stations)
+        return ClientTools(music=MusicTool(stations))
+
+
 class ChatRequestBody(BaseModel):
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
     conversation_id: str = Field(min_length=1, max_length=256)
+    client_tools: ClientToolsBody | None = None
+
+
+class ActionBody(BaseModel):
+    type: Literal["play_music"]
+    action: Literal["play", "skip", "stop", "queue"]
+    station: str | None = None
 
 
 class ChatResponseBody(BaseModel):
     message: str
     conversation_id: str
+    # For the caller to carry out; empty unless client_tools were sent and used.
+    actions: list[ActionBody] = []
 
 
 class ErrorBody(BaseModel):
@@ -80,8 +118,16 @@ def build_router(chat_service: ChatService, model: ModelPort, api_key: str) -> A
         responses={code: {"model": ErrorBody} for code in (401, 422, 502, 503, 504)},
     )
     async def chat(body: ChatRequestBody) -> ChatResponseBody:
-        reply = await chat_service.chat(body.conversation_id, body.message)
-        return ChatResponseBody(message=reply, conversation_id=body.conversation_id)
+        tools = body.client_tools.to_domain() if body.client_tools else None
+        reply = await chat_service.reply(body.conversation_id, body.message, tools)
+        return ChatResponseBody(
+            message=reply.message,
+            conversation_id=body.conversation_id,
+            actions=[
+                ActionBody(type="play_music", action=a.action.value, station=a.station)
+                for a in reply.actions
+            ],
+        )
 
     @router.get("/health")
     async def health() -> dict[str, str]:
