@@ -7,7 +7,10 @@ mod message;
 pub mod music;
 
 pub use conversation::ConversationId;
-pub use message::{ChatAction, ChatRequest, ChatResponse, ClientTools, StationOffer};
+pub use message::{
+    ActionReport, ChatAction, ChatRequest, ChatResponse, ClientTools, MusicState, PlayingTrack,
+    StationOffer,
+};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DomainError {

@@ -57,8 +57,11 @@ bot runs without the library: 6 commands instead of 9, and `/play` accepts links
 * Turn on **Bot → Privileged Gateway Intents → Message Content Intent** (to read replies
   that don't ping the bot); without it the bot fails with "Disallowed intents".
 * **Run exactly one bot per token.** A second process receives the same commands and races
-  to answer them: symptoms are "Unknown interaction" in the log and "Loading options
-  failed" in Discord. Check with `pgrep -af tatarbot-discord`.
+  to answer them: symptoms are "Unknown interaction" in the log, "Loading options failed" in
+  Discord, and `/stop` answered by the process that isn't playing. On one machine the bot
+  prevents this: it takes an exclusive lock on a file named after a hash of the token in the
+  temp directory and refuses to start (`AlreadyRunning(<pid>)`) if another process holds it
+  (`instance_lock.rs`). ECS runs exactly one task.
 
 ## Commands
 
@@ -80,7 +83,10 @@ a client-side tool. "@TatarBot put on some jazz", "เปิดเพลงช�
 playing?" come back as actions, which `chat_actions.rs` carries out through `MusicService`
 (at most 2 per message): play a station, skip, stop, or show the queue. Leaving, links and
 the library stay slash-command only. If an action fails, the bot posts the real error
-instead of the agent's text. Not offered in DMs (no voice there).
+instead of the agent's text. Not offered in DMs (no voice there). Each chat request also
+sends what is playing now and the outcomes of the actions carried out after the
+conversation's previous message, so the agent knows what it started (`chat_actions.rs`,
+`PendingReports`).
 
 **Stations.** The defaults are SomaFM channels (`lofi`, `jazz`, `chill`, `ambient`,
 `lounge`), which serve a descriptive User-Agent (the bot sends `TatarBot/<version> (+repo)`)
@@ -148,6 +154,11 @@ cargo test -- --ignored stations_decode icy_live   # live stations (needs intern
 
 Queries compile from the committed `.sqlx/` cache (`.cargo/config.toml` sets
 `SQLX_OFFLINE=true`), so builds never contact a database.
+
+**Acknowledgment timing.** Every slash command is deferred first (`respond.rs`). Each defer
+logs `discord_to_bot_ms` (gateway delivery) and `defer_ms` (the ack round trip): at debug
+level under `tatarbot::timing`, as a warning above 2 s, and in the warning when a defer
+fails. Small times with "Unknown interaction" mean another process answered first.
 
 **Measuring latency.** Run the release build with
 `RUST_LOG=info,serenity=warn,tatarbot::timing=debug NO_COLOR=1`, save the log, use the bot,

@@ -25,6 +25,8 @@ pub struct Handler {
     chat: Arc<dyn ChatService>,
     music: Arc<dyn MusicService>,
     library: Option<LibraryCommands>,
+    /// Chat action outcomes not yet reported to the agent.
+    pending: chat_actions::PendingReports,
 }
 
 impl Handler {
@@ -37,6 +39,7 @@ impl Handler {
             chat,
             music,
             library,
+            pending: chat_actions::PendingReports::default(),
         }
     }
 }
@@ -55,7 +58,15 @@ impl EventHandler for Handler {
         if !is_addressed_to_bot(&msg, bot_id) {
             return;
         }
-        respond(&ctx, &msg, bot_id, self.chat.as_ref(), self.music.as_ref()).await;
+        respond(
+            &ctx,
+            &msg,
+            bot_id,
+            self.chat.as_ref(),
+            self.music.as_ref(),
+            &self.pending,
+        )
+        .await;
     }
 
     /// A panic in a command must not leave the caller with "TatarBot is
@@ -107,6 +118,19 @@ fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_owned())
 }
 
+/// A voice channel's name from the cache (for the agent's playback state).
+fn channel_name(
+    ctx: &Context,
+    guild_id: serenity::all::GuildId,
+    channel: crate::domain::music::VoiceChannelId,
+) -> Option<String> {
+    let guild = ctx.cache.guild(guild_id)?;
+    let channel = guild
+        .channels
+        .get(&serenity::all::ChannelId::new(channel.0))?;
+    Some(channel.name.clone())
+}
+
 /// Respond only to humans who @mention the bot or reply to one of its
 /// messages. Bot authors (including ourselves) are ignored to avoid loops.
 fn is_addressed_to_bot(msg: &Message, bot_id: UserId) -> bool {
@@ -133,9 +157,11 @@ async fn respond(
     bot_id: UserId,
     chat: &dyn ChatService,
     music: &dyn MusicService,
+    pending: &chat_actions::PendingReports,
 ) {
     let text = convert::strip_bot_mention(&msg.content, bot_id);
     let conversation_id = convert::conversation_id(msg.guild_id, msg.channel_id, msg.author.id);
+    let conversation = conversation_id.as_str().to_owned();
 
     // Show "Bot is typing…" until the reply is sent (stops when dropped).
     let typing = msg.channel_id.start_typing(&ctx.http);
@@ -143,14 +169,23 @@ async fn respond(
     let messages = match ChatRequest::new(text, conversation_id) {
         Err(_) => vec![presenter::EMPTY_PROMPT.to_owned()],
         Ok(request) => {
-            // Music control is offered only in servers (there is no voice in DMs).
+            // Music control is offered only in servers (there is no voice in DMs),
+            // with what is playing now and how the last actions turned out.
+            let mut unreported = Vec::new();
             let request = match msg.guild_id {
-                Some(_) => request.with_client_tools(chat_actions::offer(music)),
+                Some(guild_id) => {
+                    let state = chat_actions::state(music, GuildId(guild_id.get()), |channel| {
+                        channel_name(ctx, guild_id, channel)
+                    })
+                    .await;
+                    unreported = pending.take(&conversation);
+                    request.with_client_tools(chat_actions::offer(music, state, unreported.clone()))
+                }
                 None => request,
             };
             match chat.chat(request).await {
                 Ok(response) => {
-                    let results = match msg.guild_id {
+                    let outcomes = match msg.guild_id {
                         Some(guild_id) if !response.actions.is_empty() => {
                             let play_ctx = PlayContext {
                                 guild: GuildId(guild_id.get()),
@@ -166,9 +201,12 @@ async fn respond(
                         }
                         _ => Vec::new(),
                     };
-                    chat_actions::compose(&response.message, &results)
+                    pending.put(&conversation, chat_actions::reports(&outcomes));
+                    chat_actions::compose(&response.message, &outcomes)
                 }
                 Err(err) => {
+                    // The runtime never saw them; send them with the next message.
+                    pending.put(&conversation, unreported);
                     tracing::warn!(error = ?err, "chat failed");
                     vec![presenter::error_message(&err)]
                 }

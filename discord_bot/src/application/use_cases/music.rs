@@ -170,6 +170,10 @@ impl<V: VoicePort, R: TrackResolver> MusicService for MusicUseCase<V, R> {
         self.voice.queue(guild).await
     }
 
+    async fn voice_channel(&self, guild: GuildId) -> Option<VoiceChannelId> {
+        self.voice.current_channel(guild).await
+    }
+
     fn stations(&self) -> &StationList {
         &self.stations
     }

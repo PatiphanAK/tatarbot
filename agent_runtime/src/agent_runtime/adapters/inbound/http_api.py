@@ -26,7 +26,15 @@ from agent_runtime.domain import (
     ModelTimeoutError,
     ModelUnavailableError,
 )
-from agent_runtime.domain.client_tools import ClientTools, MusicTool, Station
+from agent_runtime.domain.client_tools import (
+    ActionResult,
+    ClientTools,
+    MusicAction,
+    MusicState,
+    MusicTool,
+    PlayingTrack,
+    Station,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +46,32 @@ class StationBody(BaseModel):
     title: str = Field(min_length=1, max_length=100)
 
 
+class PlayingTrackBody(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    live: bool = False
+    song: str | None = Field(default=None, max_length=200)
+
+
+class MusicStateBody(BaseModel):
+    """What the bot is doing now (voice channel name, current track first)."""
+
+    channel: str | None = Field(default=None, max_length=100)
+    queue: list[PlayingTrackBody] = Field(default_factory=list, max_length=11)
+
+
+class ActionResultBody(BaseModel):
+    """The outcome of an action the bot carried out after an earlier turn."""
+
+    action: Literal["play", "skip", "stop", "queue"]
+    station: str | None = Field(default=None, max_length=32)
+    ok: bool
+    detail: str = Field(default="", max_length=300)
+
+
 class MusicToolBody(BaseModel):
     stations: list[StationBody] = Field(min_length=1, max_length=25)
+    state: MusicStateBody | None = None
+    results: list[ActionResultBody] = Field(default_factory=list, max_length=4)
 
     @field_validator("stations")
     @classmethod
@@ -57,8 +89,16 @@ class ClientToolsBody(BaseModel):
     def to_domain(self) -> ClientTools:
         if self.music is None:
             return ClientTools()
-        stations = tuple(Station(s.name, s.title) for s in self.music.stations)
-        return ClientTools(music=MusicTool(stations))
+        music = self.music
+        stations = tuple(Station(s.name, s.title) for s in music.stations)
+        state = music.state and MusicState(
+            channel=music.state.channel,
+            queue=tuple(PlayingTrack(t.title, t.live, t.song) for t in music.state.queue),
+        )
+        results = tuple(
+            ActionResult(MusicAction(r.action), r.station, r.ok, r.detail) for r in music.results
+        )
+        return ClientTools(music=MusicTool(stations, state, results))
 
 
 class ChatRequestBody(BaseModel):

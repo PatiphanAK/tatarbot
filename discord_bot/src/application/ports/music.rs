@@ -38,6 +38,8 @@ pub trait MusicService: Send + Sync {
     async fn leave(&self, ctx: PlayContext) -> Result<(), MusicError>;
     /// The current track first, then the queue.
     async fn queue(&self, guild: GuildId) -> Vec<TrackInfo>;
+    /// The voice channel the bot is in, if any (read-only; for status reports).
+    async fn voice_channel(&self, guild: GuildId) -> Option<VoiceChannelId>;
     fn stations(&self) -> &StationList;
 }
 

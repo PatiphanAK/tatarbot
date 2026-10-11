@@ -194,8 +194,14 @@ and each one fails if its lock is removed.
   then offers only `play_music`, and a valid call ends the turn without another model call:
   it comes back in the `actions` field of `/v1/chat`. The bot carries it out; if an action
   fails (not in a voice channel), it shows the real error instead of the model's text, which
-  might claim success. History stores a neutral note (`[music: play lofi]`). The runtime
-  never calls the bot, and both fields are optional, so older bots and runtimes still work.
+  might claim success. The runtime never calls the bot, and the new fields are optional, so
+  older bots and runtimes still work.
+* **Memory of actions.** History stores each action as a real tool call with a tool result,
+  "pending" until the bot reports the outcome with the conversation's next message ("ok: Now
+  playing …" or "failed: Join a voice channel first."). Every request also carries the
+  current playback state (voice channel, what's playing, the station's current song), which
+  the system message shows as data. *Why tool calls, not text notes:* with `[action] …` notes
+  in history, a model started writing such notes instead of calling the tool.
 * **Language:** each message is classified as Thai or English by script, and the system
   message tells the model which language to reply in
   (`agent_runtime/src/agent_runtime/domain/language.py`).

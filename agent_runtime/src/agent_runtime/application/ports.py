@@ -36,6 +36,11 @@ class ConversationStore(ABC):
     @abstractmethod
     async def append(self, conversation_id: str, messages: Sequence[ChatMessage]) -> None: ...
 
+    @abstractmethod
+    async def replace_last(self, conversation_id: str, messages: Sequence[ChatMessage]) -> bool:
+        """Replace the last `len(messages)` stored messages if their roles match; False
+        otherwise. Used to record the outcome of client-side actions after the fact."""
+
 
 class SearchPort(ABC):
     """Web search (Tavily today). Implementations raise `SearchError` on failure."""

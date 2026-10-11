@@ -8,6 +8,11 @@ pub enum AppError {
     InvalidEnv { key: &'static str, reason: String },
     #[error("failed to build agent HTTP client: {0}")]
     AgentClient(#[from] reqwest::Error),
+    #[error(
+        "another TatarBot process with this token is already running (pid {0}); stop it first, \
+         or both will answer every command"
+    )]
+    AlreadyRunning(String),
     #[error("TLS setup failed: {0}")]
     Tls(&'static str),
     #[error("failed to build audio HTTP client: {0}")]

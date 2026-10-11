@@ -105,6 +105,32 @@ def backend_up():
         and body.get("message") == "",
         body,
     )
+    # The next turn reports the outcome and the current state, as the bot does.
+    status, body = call(
+        "POST",
+        "/v1/chat",
+        {
+            "message": "what's playing?",
+            "conversation_id": "it:music",
+            "client_tools": {
+                "music": {
+                    "stations": stations,
+                    "state": {
+                        "channel": "General",
+                        "queue": [{"title": "Lo-fi", "live": True, "song": "A - B"}],
+                    },
+                    "results": [
+                        {"action": "play", "station": "lofi", "ok": True, "detail": "Now playing"}
+                    ],
+                }
+            },
+        },
+    )
+    check(
+        "outcomes and playback state are accepted",
+        status == 200 and body.get("actions") == [] and "#2" in body.get("message", ""),
+        body,
+    )
     status, body = chat("__play_lofi__", conversation_id="it:no-tools")
     check(
         "no client_tools: no tool offered, no actions",
