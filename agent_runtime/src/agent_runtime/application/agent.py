@@ -101,7 +101,7 @@ Do not write the answer yet."""
 
 _MUSIC_OPTION = """
 or
-Next: MUSIC (the user wants to play radio, skip, stop or see what's playing)"""
+Next: MUSIC (the user wants to play radio or a song, skip, stop or see what's playing)"""
 
 _ACT_PROMPT = """\
 [Agent step, not from the user] Your reasoning:

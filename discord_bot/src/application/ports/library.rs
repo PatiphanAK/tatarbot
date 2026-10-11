@@ -67,6 +67,9 @@ pub trait LibraryService: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<LibraryTrack>, LibraryError>;
+    /// The most recently added tracks, newest first.
+    async fn recent(&self, guild: GuildId, limit: usize)
+    -> Result<Vec<LibraryTrack>, LibraryError>;
     /// Object key of a track's audio (for playback).
     fn object_key(&self, hash: &ContentHash) -> String;
 }
@@ -196,6 +199,8 @@ pub trait LibraryRepository: Send + Sync {
         limit: usize,
     ) -> Result<(Vec<LibraryTrack>, usize), RepoError>;
     async fn used_bytes(&self, guild: GuildId) -> Result<u64, RepoError>;
+    /// Newest first.
+    async fn recent(&self, guild: GuildId, limit: usize) -> Result<Vec<LibraryTrack>, RepoError>;
     async fn sweep(
         &self,
         store: &dyn ObjectStore,

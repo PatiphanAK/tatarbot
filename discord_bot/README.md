@@ -81,8 +81,11 @@ Discord's 2,000 characters. Bots (including itself) are ignored.
 **Music from chat.** In a server, every chat request also offers the configured stations as
 a client-side tool. "@TatarBot put on some jazz", "เปิดเพลงชิลๆ หน่อย", "skip this" or "what's
 playing?" come back as actions, which `chat_actions.rs` carries out through `MusicService`
-(at most 2 per message): play a station, skip, stop, or show the queue. Leaving, links and
-the library stay slash-command only. If an action fails, the bot posts the real error
+(at most 2 per message): play a station, play a song from this server's library by title
+("@TatarBot เปิดเพลง Boys Dont Cry หน่อย"; the 20 most recent titles are sent as hints),
+skip, stop, or show the queue. A title goes through the same search as `/play <title>`;
+anything link-like is refused before that. Leaving, links, uploads and deletes stay
+slash-command only. If an action fails, the bot posts the real error
 instead of the agent's text. Not offered in DMs (no voice there). Each chat request also
 sends what is playing now and the outcomes of the actions carried out after the
 conversation's previous message, so the agent knows what it started (`chat_actions.rs`,

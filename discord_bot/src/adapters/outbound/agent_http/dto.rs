@@ -25,6 +25,10 @@ pub struct MusicToolDto<'a> {
     pub state: Option<MusicStateDto<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<ActionResultDto<'a>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub library: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub library_hints: Vec<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,21 +50,31 @@ pub struct ActionResultDto<'a> {
     pub action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub station: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<&'a str>,
     pub ok: bool,
     pub detail: &'a str,
 }
 
 /// The runtime accepts at most this many tracks in the state.
 const MAX_STATE_TRACKS: usize = 11;
-/// ... and this many results.
+/// ... this many results, and this many library hints.
 const MAX_RESULTS: usize = 4;
+const MAX_HINTS: usize = 20;
 
-fn action_fields(action: &ChatAction) -> (&'static str, Option<&str>) {
+/// At most `n` characters of `s`, cut on a character boundary.
+fn first_chars(s: &str, n: usize) -> &str {
+    s.char_indices().nth(n).map_or(s, |(i, _)| &s[..i])
+}
+
+/// (action, station, track) as the runtime names them.
+fn action_fields(action: &ChatAction) -> (&'static str, Option<&str>, Option<&str>) {
     match action {
-        ChatAction::PlayStation(station) => ("play", Some(station.as_str())),
-        ChatAction::Skip => ("skip", None),
-        ChatAction::Stop => ("stop", None),
-        ChatAction::Queue => ("queue", None),
+        ChatAction::PlayStation(station) => ("play", Some(station.as_str()), None),
+        ChatAction::PlayTrack(track) => ("play_track", None, Some(track.as_str())),
+        ChatAction::Skip => ("skip", None, None),
+        ChatAction::Stop => ("stop", None, None),
+        ChatAction::Queue => ("queue", None, None),
     }
 }
 
@@ -104,14 +118,23 @@ impl<'a> From<&'a ChatRequest> for ChatRequestDto<'a> {
                         .iter()
                         .take(MAX_RESULTS)
                         .map(|r| {
-                            let (action, station) = action_fields(&r.action);
+                            let (action, station, track) = action_fields(&r.action);
                             ActionResultDto {
                                 action,
                                 station,
+                                track,
                                 ok: r.ok,
                                 detail: &r.detail,
                             }
                         })
+                        .collect(),
+                    library: tools.music_library,
+                    library_hints: tools
+                        .music_library_hints
+                        .iter()
+                        .take(MAX_HINTS)
+                        .map(|t| first_chars(t, 100))
+                        .filter(|t| !t.is_empty())
                         .collect(),
                 },
             }),
@@ -135,17 +158,25 @@ pub struct ActionDto {
     pub action: String,
     #[serde(default)]
     pub station: Option<String>,
+    #[serde(default)]
+    pub track: Option<String>,
 }
 
 impl ActionDto {
     /// Unknown kinds or actions are dropped: the bot only does what it knows.
     fn into_action(self) -> Option<ChatAction> {
-        match (self.kind.as_str(), self.action.as_str(), self.station) {
-            ("play_music", "play", Some(station)) => Some(ChatAction::PlayStation(station)),
-            ("play_music", "skip", _) => Some(ChatAction::Skip),
-            ("play_music", "stop", _) => Some(ChatAction::Stop),
-            ("play_music", "queue", _) => Some(ChatAction::Queue),
-            (kind, action, _) => {
+        match (
+            self.kind.as_str(),
+            self.action.as_str(),
+            self.station,
+            self.track,
+        ) {
+            ("play_music", "play", Some(station), _) => Some(ChatAction::PlayStation(station)),
+            ("play_music", "play_track", _, Some(track)) => Some(ChatAction::PlayTrack(track)),
+            ("play_music", "skip", ..) => Some(ChatAction::Skip),
+            ("play_music", "stop", ..) => Some(ChatAction::Stop),
+            ("play_music", "queue", ..) => Some(ChatAction::Queue),
+            (kind, action, ..) => {
                 tracing::warn!(kind, action, "ignoring unknown action from the agent");
                 None
             }
@@ -201,6 +232,12 @@ mod tests {
                 }],
                 ..ClientTools::default()
             });
+        assert!(
+            serde_json::to_value(ChatRequestDto::from(&req)).unwrap()["client_tools"]["music"]
+                .get("library")
+                .is_none(),
+            "no library field when there is no library"
+        );
         let json = serde_json::to_value(ChatRequestDto::from(&req)).unwrap();
         assert_eq!(
             json["client_tools"],
@@ -226,11 +263,20 @@ mod tests {
                         song: Some("A - B".into()),
                     }],
                 }),
-                music_results: vec![ActionReport {
-                    action: ChatAction::PlayStation("lofi".into()),
-                    ok: true,
-                    detail: "Now playing Lo-fi".into(),
-                }],
+                music_results: vec![
+                    ActionReport {
+                        action: ChatAction::PlayStation("lofi".into()),
+                        ok: true,
+                        detail: "Now playing Lo-fi".into(),
+                    },
+                    ActionReport {
+                        action: ChatAction::PlayTrack("boys".into()),
+                        ok: false,
+                        detail: "Nothing matches".into(),
+                    },
+                ],
+                music_library: true,
+                music_library_hints: vec!["Boys Dont Cry".into(), "ก".repeat(150)],
             });
         let json = serde_json::to_value(ChatRequestDto::from(&req)).unwrap();
         assert_eq!(
@@ -239,7 +285,20 @@ mod tests {
         );
         assert_eq!(
             json["client_tools"]["music"]["results"],
-            serde_json::json!([{"action": "play", "station": "lofi", "ok": true, "detail": "Now playing Lo-fi"}])
+            serde_json::json!([
+                {"action": "play", "station": "lofi", "ok": true, "detail": "Now playing Lo-fi"},
+                {"action": "play_track", "track": "boys", "ok": false, "detail": "Nothing matches"}
+            ])
+        );
+        let hints = json["client_tools"]["music"]["library_hints"]
+            .as_array()
+            .unwrap();
+        assert_eq!(json["client_tools"]["music"]["library"], true);
+        assert_eq!(hints[0], "Boys Dont Cry");
+        assert_eq!(
+            hints[1].as_str().unwrap().chars().count(),
+            100,
+            "cut, not split mid-character"
         );
     }
 
@@ -249,6 +308,8 @@ mod tests {
             r#"{"message":"","conversation_id":"c1","actions":[
                 {"type":"play_music","action":"play","station":"jazz"},
                 {"type":"play_music","action":"skip"},
+                {"type":"play_music","action":"play_track","track":"Boys Dont Cry"},
+                {"type":"play_music","action":"play_track"},
                 {"type":"play_music","action":"play"},
                 {"type":"play_music","action":"volume_up"},
                 {"type":"open_door","action":"now"}
@@ -258,7 +319,11 @@ mod tests {
         let response = ChatResponse::try_from(dto).unwrap();
         assert_eq!(
             response.actions,
-            [ChatAction::PlayStation("jazz".into()), ChatAction::Skip]
+            [
+                ChatAction::PlayStation("jazz".into()),
+                ChatAction::Skip,
+                ChatAction::PlayTrack("Boys Dont Cry".into())
+            ]
         );
     }
 

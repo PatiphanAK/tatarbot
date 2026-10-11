@@ -64,6 +64,8 @@ pub fn command_failed() -> String {
     GENERIC_FAILURE.into()
 }
 
+pub const CHAT_LINK_REFUSED: &str =
+    "🔗 I only play links through `/play`. Ask me for a song from this server's library instead.";
 pub const MUSIC_GUILD_ONLY: &str = "🎵 Music commands work in servers only.";
 pub const MUSIC_STOPPED: &str = "⏹️ Stopped and cleared the queue.";
 pub const MUSIC_LEFT: &str = "👋 Left the voice channel.";

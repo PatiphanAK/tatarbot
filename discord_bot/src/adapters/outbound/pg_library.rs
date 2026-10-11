@@ -528,6 +528,21 @@ impl LibraryRepository for PgLibrary {
         Ok((tracks, total.max(0) as usize))
     }
 
+    async fn recent(&self, guild: GuildId, limit: usize) -> Result<Vec<LibraryTrack>, RepoError> {
+        self.ensure_available()?;
+        let rows = sqlx::query_as!(
+            Row,
+            "SELECT * FROM library_tracks WHERE guild_id = $1
+             ORDER BY created_at DESC, id DESC LIMIT $2",
+            guild.0 as i64,
+            limit as i64
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| self.fail(e))?;
+        rows.into_iter().map(LibraryTrack::try_from).collect()
+    }
+
     async fn used_bytes(&self, guild: GuildId) -> Result<u64, RepoError> {
         self.ensure_available()?;
         let used = sqlx::query_scalar!(
@@ -1036,6 +1051,14 @@ mod tests {
             ["100% Pure_Jazz"]
         );
         assert_eq!(repo.used_bytes(GuildId(1)).await.unwrap(), 40);
+        let recent: Vec<_> = repo
+            .recent(GuildId(1), 2)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(recent, ["100% Pure_Jazz", "Chill Lofi"], "newest first");
         let (page, total) = repo.list(GuildId(1), 0, 2).await.unwrap();
         assert_eq!(
             (titles(page), total),

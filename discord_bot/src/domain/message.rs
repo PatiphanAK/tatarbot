@@ -19,6 +19,10 @@ pub struct ClientTools {
     pub music_state: Option<MusicState>,
     /// Outcomes of actions carried out after the conversation's previous turn.
     pub music_results: Vec<ActionReport>,
+    /// The server has an uploaded library the agent may play songs from.
+    pub music_library: bool,
+    /// Recent library titles, to help the agent match a request.
+    pub music_library_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -56,6 +60,8 @@ pub struct StationOffer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatAction {
     PlayStation(String),
+    /// A song from the server's library, by title (never a link).
+    PlayTrack(String),
     Skip,
     Stop,
     Queue,
