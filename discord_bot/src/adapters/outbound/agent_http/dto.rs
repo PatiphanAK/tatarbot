@@ -21,6 +21,47 @@ pub struct ClientToolsDto<'a> {
 #[derive(Debug, Serialize)]
 pub struct MusicToolDto<'a> {
     pub stations: Vec<StationDto<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<MusicStateDto<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<ActionResultDto<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MusicStateDto<'a> {
+    pub channel: Option<&'a str>,
+    pub queue: Vec<PlayingTrackDto<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlayingTrackDto<'a> {
+    pub title: &'a str,
+    pub live: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub song: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionResultDto<'a> {
+    pub action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub station: Option<&'a str>,
+    pub ok: bool,
+    pub detail: &'a str,
+}
+
+/// The runtime accepts at most this many tracks in the state.
+const MAX_STATE_TRACKS: usize = 11;
+/// ... and this many results.
+const MAX_RESULTS: usize = 4;
+
+fn action_fields(action: &ChatAction) -> (&'static str, Option<&str>) {
+    match action {
+        ChatAction::PlayStation(station) => ("play", Some(station.as_str())),
+        ChatAction::Skip => ("skip", None),
+        ChatAction::Stop => ("stop", None),
+        ChatAction::Queue => ("queue", None),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -31,7 +72,8 @@ pub struct StationDto<'a> {
 
 impl<'a> From<&'a ChatRequest> for ChatRequestDto<'a> {
     fn from(req: &'a ChatRequest) -> Self {
-        let stations = &req.client_tools.music_stations;
+        let tools = &req.client_tools;
+        let stations = &tools.music_stations;
         Self {
             message: &req.message,
             conversation_id: req.conversation_id.as_str(),
@@ -42,6 +84,33 @@ impl<'a> From<&'a ChatRequest> for ChatRequestDto<'a> {
                         .map(|s| StationDto {
                             name: &s.name,
                             title: &s.title,
+                        })
+                        .collect(),
+                    state: tools.music_state.as_ref().map(|state| MusicStateDto {
+                        channel: state.channel.as_deref(),
+                        queue: state
+                            .queue
+                            .iter()
+                            .take(MAX_STATE_TRACKS)
+                            .map(|t| PlayingTrackDto {
+                                title: &t.title,
+                                live: t.live,
+                                song: t.song.as_deref(),
+                            })
+                            .collect(),
+                    }),
+                    results: tools
+                        .music_results
+                        .iter()
+                        .take(MAX_RESULTS)
+                        .map(|r| {
+                            let (action, station) = action_fields(&r.action);
+                            ActionResultDto {
+                                action,
+                                station,
+                                ok: r.ok,
+                                detail: &r.detail,
+                            }
                         })
                         .collect(),
                 },
@@ -130,11 +199,47 @@ mod tests {
                     name: "lofi".into(),
                     title: "Lo-fi".into(),
                 }],
+                ..ClientTools::default()
             });
         let json = serde_json::to_value(ChatRequestDto::from(&req)).unwrap();
         assert_eq!(
             json["client_tools"],
             serde_json::json!({"music": {"stations": [{"name": "lofi", "title": "Lo-fi"}]}})
+        );
+    }
+
+    #[test]
+    fn sends_playback_state_and_outcomes() {
+        use crate::domain::{ActionReport, ClientTools, MusicState, PlayingTrack, StationOffer};
+        let req = ChatRequest::new("what's on?", ConversationId::new("c1").unwrap())
+            .unwrap()
+            .with_client_tools(ClientTools {
+                music_stations: vec![StationOffer {
+                    name: "lofi".into(),
+                    title: "Lo-fi".into(),
+                }],
+                music_state: Some(MusicState {
+                    channel: Some("General".into()),
+                    queue: vec![PlayingTrack {
+                        title: "Lo-fi".into(),
+                        live: true,
+                        song: Some("A - B".into()),
+                    }],
+                }),
+                music_results: vec![ActionReport {
+                    action: ChatAction::PlayStation("lofi".into()),
+                    ok: true,
+                    detail: "Now playing Lo-fi".into(),
+                }],
+            });
+        let json = serde_json::to_value(ChatRequestDto::from(&req)).unwrap();
+        assert_eq!(
+            json["client_tools"]["music"]["state"],
+            serde_json::json!({"channel": "General", "queue": [{"title": "Lo-fi", "live": true, "song": "A - B"}]})
+        );
+        assert_eq!(
+            json["client_tools"]["music"]["results"],
+            serde_json::json!([{"action": "play", "station": "lofi", "ok": true, "detail": "Now playing Lo-fi"}])
         );
     }
 

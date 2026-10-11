@@ -221,7 +221,7 @@ pub async fn autocomplete(ctx: &Context, cmd: &CommandInteraction, library: &dyn
         chars = typed.chars().count(),
         choices = tracks.len(),
         ok = sent.is_ok(),
-        discord_to_bot_ms = super::music::since_created_ms(cmd),
+        discord_to_bot_ms = super::respond::since_created_ms(cmd),
         replied_ms = received.elapsed().as_millis() as u64,
         "autocomplete"
     );

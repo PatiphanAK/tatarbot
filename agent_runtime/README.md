@@ -69,8 +69,16 @@ after a `SEARCH` decision.
 A valid call ends the turn with no further model call and is returned in `actions`;
 invalid arguments are dropped (logged) and the model is asked to answer instead. The
 runtime never runs these tools and never calls the bot. `message` may be empty when there
-are actions; history stores `[music: <action> <station>]` so the conversation keeps
-context without claiming success (`domain/client_tools.py`, `application/agent.py`).
+are actions (`domain/client_tools.py`, `application/agent.py`).
+
+**Memory.** History stores the turn as an assistant message with the `play_music` calls
+and one tool message per call, `pending` until the caller reports the outcome: requests may
+carry `client_tools.music.results` (`{action, station, ok, detail}`, at most 4), which turn
+those into `ok: …` / `failed: …`. Requests may also carry `client_tools.music.state`
+(`channel`, `queue` of `{title, live, song}`), shown in the system message every turn as
+"Music right now". Titles are flattened to one line and truncated: radio and upload titles
+are untrusted. Text notes were tried first and a model imitated them instead of calling
+the tool, so any `[action]` lines in a reply are removed.
 
 ## System prompt, reply language, guardrails
 

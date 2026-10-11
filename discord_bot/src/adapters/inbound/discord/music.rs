@@ -133,20 +133,12 @@ pub async fn handle(ctx: &Context, cmd: &CommandInteraction, music: &dyn MusicSe
         command = %cmd.data.name,
         guild = guild_id.get(),
         ok = result.is_ok(),
-        discord_to_bot_ms = since_created_ms(cmd),
+        discord_to_bot_ms = respond::since_created_ms(cmd),
         defer_ms,
         handled_ms = received.elapsed().as_millis() as u64,
         "music command"
     );
     reply.result(result).await;
-}
-
-/// Discord's interaction id encodes its creation time: gateway delivery
-/// latency (assuming the local clock is NTP-synced).
-pub fn since_created_ms(cmd: &CommandInteraction) -> i64 {
-    let created = cmd.id.created_at().unix_timestamp() * 1000
-        + i64::from(cmd.id.created_at().nanosecond() / 1_000_000);
-    chrono::Utc::now().timestamp_millis() - created
 }
 
 /// The caller's voice channel. The gateway cache (GUILDS + GUILD_VOICE_STATES

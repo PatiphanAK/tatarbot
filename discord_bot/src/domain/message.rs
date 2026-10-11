@@ -15,6 +15,35 @@ pub struct ChatRequest {
 pub struct ClientTools {
     /// Radio stations the agent may pick from (empty: no music control).
     pub music_stations: Vec<StationOffer>,
+    /// What is playing now, so the agent knows the current state every turn.
+    pub music_state: Option<MusicState>,
+    /// Outcomes of actions carried out after the conversation's previous turn.
+    pub music_results: Vec<ActionReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MusicState {
+    /// Voice channel name; `None` when the bot is not in one.
+    pub channel: Option<String>,
+    /// Current track first.
+    pub queue: Vec<PlayingTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayingTrack {
+    pub title: String,
+    pub live: bool,
+    /// A live station's current song.
+    pub song: Option<String>,
+}
+
+/// How an action the agent asked for turned out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionReport {
+    pub action: ChatAction,
+    pub ok: bool,
+    /// Plain text: what happened, or why not.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

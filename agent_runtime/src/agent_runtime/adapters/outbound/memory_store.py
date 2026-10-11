@@ -21,6 +21,16 @@ class InMemoryConversationStore(ConversationStore):
         self._data.move_to_end(conversation_id)
         return list(messages)
 
+    async def replace_last(self, conversation_id: str, messages: Sequence[ChatMessage]) -> bool:
+        stored = self._data.get(conversation_id)
+        n = len(messages)
+        if not stored or n == 0 or len(stored) < n:
+            return False
+        if any(old.role is not new.role for old, new in zip(stored[-n:], messages, strict=True)):
+            return False
+        stored[-n:] = messages
+        return True
+
     async def append(self, conversation_id: str, messages: Sequence[ChatMessage]) -> None:
         stored = self._data.setdefault(conversation_id, [])
         stored.extend(messages)

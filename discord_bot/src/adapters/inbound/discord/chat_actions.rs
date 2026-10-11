@@ -3,17 +3,35 @@
 //! as the slash commands, so the same rules apply (you must be in a voice
 //! channel, the station must exist, ...). The runtime never calls the bot,
 //! and if it is down, slash commands keep working.
+//!
+//! So the agent remembers what happened, every chat request also carries the
+//! current playback state, and the outcomes of the actions carried out after
+//! that conversation's previous turn (`PendingReports`).
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::application::ports::{MusicService, PlayContext};
-use crate::domain::{ChatAction, ClientTools, StationOffer};
+use crate::domain::music::{GuildId, VoiceChannelId};
+use crate::domain::{
+    ActionReport, ChatAction, ClientTools, MusicState, PlayingTrack, StationOffer,
+};
 
 use super::presenter;
 
 /// More would let one message queue up a burst of commands.
 pub const MAX_ACTIONS: usize = 2;
+const MAX_DETAIL_CHARS: usize = 300;
+/// Bound on conversations with unreported outcomes.
+const MAX_PENDING: usize = 1_000;
 
-/// What the agent may ask for: the configured stations, by name and title.
-pub fn offer(music: &dyn MusicService) -> ClientTools {
+/// What the agent may ask for (the configured stations), what is playing now,
+/// and how the previous turn's actions turned out.
+pub fn offer(
+    music: &dyn MusicService,
+    state: MusicState,
+    results: Vec<ActionReport>,
+) -> ClientTools {
     ClientTools {
         music_stations: music
             .stations()
@@ -23,19 +41,52 @@ pub fn offer(music: &dyn MusicService) -> ClientTools {
                 title: s.title.clone(),
             })
             .collect(),
+        music_state: Some(state),
+        music_results: results,
     }
 }
 
-/// Carries out up to `MAX_ACTIONS`, in order. `Ok` is public text, `Err` a refusal.
+/// The bot's voice channel (by name) and queue in `guild`.
+pub async fn state(
+    music: &dyn MusicService,
+    guild: GuildId,
+    channel_name: impl Fn(VoiceChannelId) -> Option<String>,
+) -> MusicState {
+    let Some(channel) = music.voice_channel(guild).await else {
+        return MusicState::default();
+    };
+    let queue = music
+        .queue(guild)
+        .await
+        .into_iter()
+        .map(|t| PlayingTrack {
+            title: t.title,
+            live: t.live,
+            song: t.now_playing,
+        })
+        .collect();
+    MusicState {
+        channel: Some(channel_name(channel).unwrap_or_else(|| "voice".to_owned())),
+        queue,
+    }
+}
+
+pub struct Outcome {
+    pub action: ChatAction,
+    /// `Ok`: public text; `Err`: a refusal.
+    pub result: Result<String, String>,
+}
+
+/// Carries out up to `MAX_ACTIONS`, in order.
 pub async fn execute(
     music: &dyn MusicService,
     ctx: PlayContext,
     actions: &[ChatAction],
-) -> Vec<Result<String, String>> {
+) -> Vec<Outcome> {
     if actions.len() > MAX_ACTIONS {
         tracing::warn!(requested = actions.len(), "ignoring extra chat actions");
     }
-    let mut results = Vec::new();
+    let mut outcomes = Vec::new();
     for action in actions.iter().take(MAX_ACTIONS) {
         let result = match action {
             ChatAction::PlayStation(name) => music
@@ -53,26 +104,85 @@ pub async fn execute(
             ChatAction::Queue => Ok(presenter::queue(&music.queue(ctx.guild).await)),
         };
         tracing::info!(?action, ok = result.is_ok(), "chat action");
-        results.push(result.map_err(|err| presenter::music_error(&err)));
+        outcomes.push(Outcome {
+            action: action.clone(),
+            result: result.map_err(|err| presenter::music_error(&err)),
+        });
     }
-    results
+    outcomes
 }
 
 /// The messages to post. The agent's text is kept only if every action
 /// succeeded: when one fails it may have claimed success, so only the real
 /// outcomes are shown.
-pub fn compose(agent_text: &str, results: &[Result<String, String>]) -> Vec<String> {
-    let failed = results.iter().any(Result::is_err);
+pub fn compose(agent_text: &str, outcomes: &[Outcome]) -> Vec<String> {
+    let failed = outcomes.iter().any(|o| o.result.is_err());
     let mut out = Vec::new();
     if !failed && !agent_text.trim().is_empty() {
         out.push(agent_text.trim().to_owned());
     }
-    out.extend(
-        results
-            .iter()
-            .map(|r| r.as_ref().map_or_else(Clone::clone, Clone::clone)),
-    );
+    out.extend(outcomes.iter().map(|o| match &o.result {
+        Ok(text) | Err(text) => text.clone(),
+    }));
     out
+}
+
+/// Outcomes for the agent: what happened, as plain text.
+pub fn reports(outcomes: &[Outcome]) -> Vec<ActionReport> {
+    outcomes
+        .iter()
+        .map(|o| {
+            let (ok, text) = match &o.result {
+                Ok(text) => (true, text),
+                Err(text) => (false, text),
+            };
+            ActionReport {
+                action: o.action.clone(),
+                ok,
+                detail: plain(text),
+            }
+        })
+        .collect()
+}
+
+/// Presenter text without Discord markup or mentions.
+fn plain(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or_default();
+    let without_mention = first_line
+        .split(" · requested by")
+        .next()
+        .unwrap_or_default();
+    without_mention
+        .replace("**", "")
+        .replace('\\', "")
+        .chars()
+        .take(MAX_DETAIL_CHARS)
+        .collect()
+}
+
+/// Outcomes waiting for the conversation's next chat request.
+#[derive(Default)]
+pub struct PendingReports(Mutex<HashMap<String, Vec<ActionReport>>>);
+
+impl PendingReports {
+    pub fn put(&self, conversation: &str, reports: Vec<ActionReport>) {
+        if reports.is_empty() {
+            return;
+        }
+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.len() >= MAX_PENDING {
+            pending.clear();
+        }
+        pending
+            .entry(conversation.to_owned())
+            .or_default()
+            .extend(reports);
+    }
+
+    pub fn take(&self, conversation: &str) -> Vec<ActionReport> {
+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(conversation).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +254,9 @@ mod tests {
         async fn queue(&self, _: GuildId) -> Vec<TrackInfo> {
             vec![track("Lo-fi beats")]
         }
+        async fn voice_channel(&self, _: GuildId) -> Option<VoiceChannelId> {
+            Some(VoiceChannelId(10))
+        }
         fn stations(&self) -> &StationList {
             &self.stations
         }
@@ -159,7 +272,7 @@ mod tests {
 
     #[test]
     fn offers_the_configured_stations() {
-        let tools = offer(&FakeMusic::new());
+        let tools = offer(&FakeMusic::new(), MusicState::default(), Vec::new());
         assert_eq!(
             tools.music_stations,
             [StationOffer {
@@ -232,5 +345,69 @@ mod tests {
         let posted = compose("ok", &results);
         assert!(posted[0].starts_with("▶️ **Lo-fi beats**"), "{posted:?}");
         assert_eq!(posted[1], "📭 Nothing is playing.");
+    }
+
+    #[tokio::test]
+    async fn outcomes_become_plain_reports() {
+        let music = FakeMusic::new();
+        let not_in_voice = PlayContext {
+            user_channel: None,
+            ..in_voice()
+        };
+        let mut outcomes = execute(
+            &music,
+            in_voice(),
+            &[ChatAction::PlayStation("lofi".into())],
+        )
+        .await;
+        outcomes.extend(
+            execute(
+                &music,
+                not_in_voice,
+                &[ChatAction::PlayStation("lofi".into())],
+            )
+            .await,
+        );
+
+        let reports = reports(&outcomes);
+
+        assert_eq!(
+            reports[0],
+            ActionReport {
+                action: ChatAction::PlayStation("lofi".into()),
+                ok: true,
+                detail: "▶️ Now playing Lo-fi beats 🔴 LIVE".into(),
+            }
+        );
+        assert!(!reports[1].ok);
+        assert_eq!(reports[1].detail, "🔇 Join a voice channel first.");
+    }
+
+    #[test]
+    fn pending_reports_wait_for_their_conversation() {
+        let pending = PendingReports::default();
+        let report = ActionReport {
+            action: ChatAction::Skip,
+            ok: true,
+            detail: "Skipped".into(),
+        };
+        pending.put("a", vec![report.clone()]);
+        pending.put("a", vec![report.clone()]);
+        pending.put("b", Vec::new());
+
+        assert!(pending.take("b").is_empty());
+        assert_eq!(pending.take("a"), [report.clone(), report]);
+        assert!(pending.take("a").is_empty(), "taken once");
+    }
+
+    #[tokio::test]
+    async fn state_reports_channel_and_queue() {
+        let music = FakeMusic::new();
+
+        let state = state(&music, GuildId(1), |c| Some(format!("room-{}", c.0))).await;
+
+        assert_eq!(state.channel.as_deref(), Some("room-10"));
+        assert_eq!(state.queue[0].title, "Lo-fi beats");
+        assert!(state.queue[0].live);
     }
 }

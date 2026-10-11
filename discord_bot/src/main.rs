@@ -5,6 +5,7 @@ mod application;
 mod config;
 mod domain;
 mod error;
+mod instance_lock;
 mod library;
 mod tls;
 
@@ -35,6 +36,7 @@ async fn main() -> Result<(), AppError> {
     tls::install_crypto_provider()?;
 
     let config = Config::from_env()?;
+    let _instance = instance_lock::acquire(&std::env::temp_dir(), &config.discord.token)?;
 
     // Outbound adapter -> use case -> inbound port.
     let agent = HttpAgentClient::new(

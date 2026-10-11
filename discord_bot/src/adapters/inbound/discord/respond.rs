@@ -11,6 +11,8 @@ use serenity::all::{
     EditInteractionResponse,
 };
 
+use std::time::Instant;
+
 use super::presenter;
 
 pub struct Deferred<'a> {
@@ -21,18 +23,59 @@ pub struct Deferred<'a> {
 /// Acknowledges the command ("TatarBot is thinking…"). `None` if Discord
 /// refused, e.g. the interaction already expired or another process with the
 /// same token answered it first.
+///
+/// Timing (to locate a slow acknowledgment): `discord_to_bot_ms` is gateway
+/// delivery (interaction id timestamp vs local clock), `defer_ms` the ack
+/// round trip. Discord's limit is 3 s for both together.
 pub async fn defer<'a>(ctx: &'a Context, cmd: &'a CommandInteraction) -> Option<Deferred<'a>> {
-    match cmd.defer(&ctx.http).await {
-        Ok(()) => Some(Deferred { ctx, cmd }),
+    let discord_to_bot_ms = since_created_ms(cmd);
+    let started = Instant::now();
+    let result = cmd.defer(&ctx.http).await;
+    let defer_ms = started.elapsed().as_millis() as i64;
+    match result {
+        Ok(()) => {
+            let total_ms = discord_to_bot_ms + defer_ms;
+            if total_ms > SLOW_ACK_MS {
+                tracing::warn!(
+                    command = %cmd.data.name,
+                    discord_to_bot_ms,
+                    defer_ms,
+                    "slow interaction acknowledgment (Discord's limit is 3000 ms)"
+                );
+            } else {
+                tracing::debug!(
+                    target: "tatarbot::timing",
+                    command = %cmd.data.name,
+                    discord_to_bot_ms,
+                    defer_ms,
+                    "interaction deferred"
+                );
+            }
+            Some(Deferred { ctx, cmd })
+        }
         Err(err) => {
             tracing::warn!(
                 command = %cmd.data.name,
                 %err,
-                "failed to defer interaction (expired, or another bot process answered it)"
+                discord_to_bot_ms,
+                defer_ms,
+                "failed to defer interaction: if both times are small, another bot process \
+                 with the same token answered it (check `pgrep -af tatarbot-discord`)"
             );
             None
         }
     }
+}
+
+/// Above this, a successful ack is logged as a warning: close to the limit.
+const SLOW_ACK_MS: i64 = 2_000;
+
+/// Discord's interaction id encodes its creation time: gateway delivery
+/// latency (assuming the local clock is NTP-synced).
+pub fn since_created_ms(cmd: &CommandInteraction) -> i64 {
+    let created = cmd.id.created_at().unix_timestamp() * 1000
+        + i64::from(cmd.id.created_at().nanosecond() / 1_000_000);
+    chrono::Utc::now().timestamp_millis() - created
 }
 
 impl Deferred<'_> {
