@@ -61,7 +61,9 @@ On only with `TAVILY_API_KEY`; without it a turn is one plain model call with no
 
 The caller may send `client_tools.music.stations` (1–25, unique `a-z0-9-` names, titles up
 to 100 characters). The model is then offered `play_music` with `action` ∈ play, skip, stop,
-queue and `station` ∈ the names sent, and the system message gains short music rules
+queue and `station` ∈ the names sent. With `library: true` it also gets `play_track` and a
+free-text `track` (≤ 100 characters; `library_hints`, up to 20 recent titles, go into its
+description, flattened to one line); titles containing `://` are dropped, and the system message gains short music rules
 (reply in one sentence, never claim it's playing). With web search on, the reason step can
 choose `Next: MUSIC`, and only then is `play_music` offered, never next to `web_search`
 after a `SEARCH` decision.

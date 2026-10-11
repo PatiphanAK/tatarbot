@@ -173,12 +173,15 @@ and each one fails if its lock is removed.
   redacted. Search results are passed to the model as untrusted content.
 * **Secrets** live in SSM Parameter Store and `.env` files only; TLS to Supabase is
   verified against its root CA (`sslmode=verify-full`).
-* **Enum-only tool arguments:** the `play_music` tool's `station` is an enum of the stations
-  the bot sent, and `action` is one of play, skip, stop, queue. Arguments outside that are
-  dropped by the runtime, unknown actions by the bot, and the bot runs at most 2 actions per
-  message. Even a successful prompt injection can only pick a listed station; it can't make
-  the bot fetch a URL, leave, or touch the library
-  (`agent_runtime/src/agent_runtime/domain/client_tools.py`).
+* **Bounded tool arguments:** the `play_music` tool's `station` is an enum of the stations
+  the bot sent, and `action` is one of play, play_track, skip, stop, queue. Song titles
+  (`play_track`) are free text, since a library can hold hundreds of titles; they are only
+  ever searched in the server's own library: link-like text is dropped by the runtime and
+  refused again by the bot before `MusicService` is called. The bot runs at most 2 actions
+  per message. Even a successful prompt injection can only pick a listed station or a song
+  already uploaded to that server; it can't make the bot fetch a URL, leave, upload or delete
+  (`agent_runtime/src/agent_runtime/domain/client_tools.py`,
+  `discord_bot/src/adapters/inbound/discord/chat_actions.rs`).
 
 ### 7. Agent runtime
 
@@ -190,7 +193,8 @@ and each one fails if its lock is removed.
 * **Server-side tools** run inside the runtime: today that is `web_search` (Tavily). The
   reply carries a sources footer built from the actual results.
 * **Client-side tools** run in the caller, not the runtime. The bot sends what it supports
-  in `client_tools` (its station list); the reason step may choose `Next: MUSIC`, the act step
+  in `client_tools` (its station list, and with a library the 20 most recent titles as hints
+  for matching requests like "play that Proxie song"); the reason step may choose `Next: MUSIC`, the act step
   then offers only `play_music`, and a valid call ends the turn without another model call:
   it comes back in the `actions` field of `/v1/chat`. The bot carries it out; if an action
   fails (not in a voice channel), it shows the real error instead of the model's text, which
@@ -237,7 +241,7 @@ Design records: [ADR 0001](docs/adr/0001-inference-provider.md) and
 | Library search (database round trip) | 2.7–8.8 ms | `EXPLAIN ANALYZE` of the search query on 100,000 synthetic tracks across 100 servers (1,000 per server), local Postgres 17 |
 | Command to first audio | not measured yet | `discord_bot/scripts/timing_report.py` turns the `tatarbot::timing` debug log of a session into these numbers |
 | Autocomplete reply time | not measured yet | same |
-| Chat music request to action (runtime only) | about 2.0 s (4 prompts) | Alibaba `qwen3.8-flash`: Thai "เปิดเพลงชิลๆ หน่อย" → `play chill`, "put on some jazz" → `play jazz`, "skip this song" → `skip`, a maths question → no action; two model calls each (reason + act) |
+| Chat music request to action (runtime only) | about 2.0 s (4 prompts; a library title 2–7.5 s) | Alibaba `qwen3.8-flash`: Thai "เปิดเพลงชิลๆ หน่อย" → `play chill`, "put on some jazz" → `play jazz`, "skip this song" → `skip`, a maths question → no action; two model calls each (reason + act) |
 
 ## Run and test
 
@@ -263,6 +267,6 @@ Each directory's README has the configuration and details: [discord_bot](discord
 ## Status and plans
 
 Built: chat with the agent runtime, radio, direct links, the server library, fuzzy search,
-music control from chat (stations, skip, stop, queue), CI, and the AWS Terraform (not
-applied). Not yet: playing library tracks or links from chat (the tool covers stations only,
-by design), and the audio latency measurements above.
+music control from chat (stations, library songs by title, skip, stop, queue), CI, and the
+AWS Terraform (not applied). By design, chat can't play links, leave, upload or delete; and
+the audio latency measurements above are still to do.

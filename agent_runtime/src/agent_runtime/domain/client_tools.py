@@ -25,9 +25,15 @@ PLAY_MUSIC = "play_music"
 
 class MusicAction(StrEnum):
     PLAY = "play"
+    # A song from the server's uploaded library, by title (free text).
+    PLAY_TRACK = "play_track"
     SKIP = "skip"
     STOP = "stop"
     QUEUE = "queue"
+
+
+MAX_TRACK_CHARS = 100
+MAX_HINTS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +66,7 @@ class ActionResult:
     station: str | None
     ok: bool
     detail: str = ""
+    track: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +74,10 @@ class MusicTool:
     stations: tuple[Station, ...]
     state: MusicState | None = None
     results: tuple[ActionResult, ...] = ()
+    # The server has an uploaded library the bot can search by title.
+    library: bool = False
+    # Recent library titles, to help match a request; not a complete list.
+    library_hints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,36 +97,54 @@ class ClientAction:
     type: str = PLAY_MUSIC
     # The model's tool call id, to pair the call with its result in history.
     call_id: str = field(default="", compare=False)
+    # play_track only: the title to search for in the server's library.
+    track: str | None = None
 
     def as_tool_call(self) -> ToolCall:
         args = {"action": self.action.value}
         if self.station:
             args["station"] = self.station
+        if self.track:
+            args["track"] = self.track
         return ToolCall(self.call_id or "call", PLAY_MUSIC, json.dumps(args))
 
 
 def play_music_spec(tool: MusicTool) -> ToolSpec:
     listing = "; ".join(f"{s.name}: {s.title}" for s in tool.stations)
+    actions = [a.value for a in MusicAction if tool.library or a is not MusicAction.PLAY_TRACK]
+    properties: dict = {
+        "action": {"type": "string", "enum": actions},
+        "station": {
+            "type": "string",
+            "enum": [s.name for s in tool.stations],
+            "description": "Required for action=play; the station that best fits.",
+        },
+    }
+    library = ""
+    if tool.library:
+        hints = "; ".join(clean(t, MAX_TRACK_CHARS) for t in tool.library_hints[:MAX_HINTS])
+        properties["track"] = {
+            "type": "string",
+            "maxLength": MAX_TRACK_CHARS,
+            "description": (
+                "Required for action=play_track: the song's title (or part of it) to look up "
+                "in this server's uploaded library. Titles only, never links."
+                + (f" Recent titles (not a complete list): {hints}." if hints else "")
+            ),
+        }
+        library = (
+            " play_track plays or queues a song from this server's uploaded library, found "
+            "by title."
+        )
     return ToolSpec(
         name=PLAY_MUSIC,
         description=(
             "Control music in the user's Discord voice channel: play one of the bot's radio "
-            "stations, skip the current track, stop, or show the queue. Use only when the "
-            "user asks for music or radio. The bot carries it out and reports the result, "
+            "stations, skip the current track, stop, or show the queue." + library + " Use "
+            "only when the user asks for music. The bot carries it out and reports the result, "
             f"so don't claim success yourself. Stations: {listing}."
         ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": [a.value for a in MusicAction]},
-                "station": {
-                    "type": "string",
-                    "enum": [s.name for s in tool.stations],
-                    "description": "Required for action=play; the station that best fits.",
-                },
-            },
-            "required": ["action"],
-        },
+        parameters={"type": "object", "properties": properties, "required": ["action"]},
     )
 
 
@@ -128,6 +157,14 @@ def parse_play_music(call: ToolCall, tool: MusicTool) -> ClientAction | None:
         action = MusicAction(str(args["action"]).strip().lower())
     except (ValueError, KeyError, TypeError):
         return None
+    if action is MusicAction.PLAY_TRACK:
+        if not tool.library:
+            return None
+        track = clean(str(args.get("track") or ""), MAX_TRACK_CHARS)
+        # The bot also refuses links; the runtime drops them first.
+        if not track or "://" in track:
+            return None
+        return ClientAction(action, call_id=call.id, track=track)
     if action is not MusicAction.PLAY:
         return ClientAction(action, call_id=call.id)
     station = str(args.get("station") or "").strip().lower()
@@ -168,7 +205,11 @@ def apply_results(
                 args = json.loads(call.arguments)
             except ValueError:
                 continue
-            if args.get("action") == result.action.value and args.get("station") == result.station:
+            if (
+                args.get("action") == result.action.value
+                and args.get("station") == result.station
+                and args.get("track") == result.track
+            ):
                 contents[i] = result_text(result)
                 used.add(i)
                 break

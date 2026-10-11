@@ -64,6 +64,7 @@ impl EventHandler for Handler {
             bot_id,
             self.chat.as_ref(),
             self.music.as_ref(),
+            self.library.as_ref().map(|lib| lib.service.as_ref()),
             &self.pending,
         )
         .await;
@@ -118,6 +119,22 @@ fn panic_reason(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".to_owned())
 }
 
+/// Recent library titles for the agent; empty if the library is slow or down
+/// (it is still offered: the action then reports "temporarily unavailable").
+async fn library_hints(
+    library: &dyn LibraryService,
+    guild_id: serenity::all::GuildId,
+) -> Vec<String> {
+    let recent = library.recent(GuildId(guild_id.get()), LIBRARY_HINTS);
+    match tokio::time::timeout(LIBRARY_HINTS_BUDGET, recent).await {
+        Ok(Ok(tracks)) => tracks.into_iter().map(|t| t.title).collect(),
+        _ => Vec::new(),
+    }
+}
+
+const LIBRARY_HINTS: usize = 20;
+const LIBRARY_HINTS_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// A voice channel's name from the cache (for the agent's playback state).
 fn channel_name(
     ctx: &Context,
@@ -157,6 +174,7 @@ async fn respond(
     bot_id: UserId,
     chat: &dyn ChatService,
     music: &dyn MusicService,
+    library: Option<&dyn LibraryService>,
     pending: &chat_actions::PendingReports,
 ) {
     let text = convert::strip_bot_mention(&msg.content, bot_id);
@@ -179,7 +197,16 @@ async fn respond(
                     })
                     .await;
                     unreported = pending.take(&conversation);
-                    request.with_client_tools(chat_actions::offer(music, state, unreported.clone()))
+                    let hints = match library {
+                        Some(library) => Some(library_hints(library, guild_id).await),
+                        None => None,
+                    };
+                    request.with_client_tools(chat_actions::offer(
+                        music,
+                        state,
+                        unreported.clone(),
+                        hints,
+                    ))
                 }
                 None => request,
             };

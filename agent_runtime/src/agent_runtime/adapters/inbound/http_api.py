@@ -62,8 +62,9 @@ class MusicStateBody(BaseModel):
 class ActionResultBody(BaseModel):
     """The outcome of an action the bot carried out after an earlier turn."""
 
-    action: Literal["play", "skip", "stop", "queue"]
+    action: Literal["play", "play_track", "skip", "stop", "queue"]
     station: str | None = Field(default=None, max_length=32)
+    track: str | None = Field(default=None, max_length=100)
     ok: bool
     detail: str = Field(default="", max_length=300)
 
@@ -72,6 +73,16 @@ class MusicToolBody(BaseModel):
     stations: list[StationBody] = Field(min_length=1, max_length=25)
     state: MusicStateBody | None = None
     results: list[ActionResultBody] = Field(default_factory=list, max_length=4)
+    # The server has an uploaded library; recent titles help match requests.
+    library: bool = False
+    library_hints: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("library_hints")
+    @classmethod
+    def bounded_hints(cls, hints: list[str]) -> list[str]:
+        if any(len(h) > 100 for h in hints):
+            raise ValueError("library hints must be at most 100 characters")
+        return hints
 
     @field_validator("stations")
     @classmethod
@@ -96,9 +107,12 @@ class ClientToolsBody(BaseModel):
             queue=tuple(PlayingTrack(t.title, t.live, t.song) for t in music.state.queue),
         )
         results = tuple(
-            ActionResult(MusicAction(r.action), r.station, r.ok, r.detail) for r in music.results
+            ActionResult(MusicAction(r.action), r.station, r.ok, r.detail, r.track)
+            for r in music.results
         )
-        return ClientTools(music=MusicTool(stations, state, results))
+        return ClientTools(
+            music=MusicTool(stations, state, results, music.library, tuple(music.library_hints))
+        )
 
 
 class ChatRequestBody(BaseModel):
@@ -109,8 +123,9 @@ class ChatRequestBody(BaseModel):
 
 class ActionBody(BaseModel):
     type: Literal["play_music"]
-    action: Literal["play", "skip", "stop", "queue"]
+    action: Literal["play", "play_track", "skip", "stop", "queue"]
     station: str | None = None
+    track: str | None = None
 
 
 class ChatResponseBody(BaseModel):
@@ -164,7 +179,9 @@ def build_router(chat_service: ChatService, model: ModelPort, api_key: str) -> A
             message=reply.message,
             conversation_id=body.conversation_id,
             actions=[
-                ActionBody(type="play_music", action=a.action.value, station=a.station)
+                ActionBody(
+                    type="play_music", action=a.action.value, station=a.station, track=a.track
+                )
                 for a in reply.actions
             ],
         )

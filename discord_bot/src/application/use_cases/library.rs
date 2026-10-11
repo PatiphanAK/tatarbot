@@ -281,6 +281,15 @@ where
             .map_err(repo_error)
     }
 
+    async fn recent(
+        &self,
+        guild: GuildId,
+        limit: usize,
+    ) -> Result<Vec<LibraryTrack>, LibraryError> {
+        self.available()?;
+        self.repo.recent(guild, limit).await.map_err(repo_error)
+    }
+
     fn object_key(&self, hash: &ContentHash) -> String {
         hash.object_key(&self.settings.prefix)
     }
@@ -462,6 +471,20 @@ mod tests {
                 .filter(|r| r.guild == guild)
                 .map(|r| r.size_bytes)
                 .sum())
+        }
+        async fn recent(
+            &self,
+            guild: GuildId,
+            limit: usize,
+        ) -> Result<Vec<LibraryTrack>, RepoError> {
+            let rows = self.rows.lock().unwrap();
+            Ok(rows
+                .iter()
+                .rev()
+                .filter(|r| r.guild == guild)
+                .take(limit)
+                .cloned()
+                .collect())
         }
         async fn sweep(
             &self,

@@ -41,8 +41,9 @@ MAX_SOURCES_SHOWN = 3
 _MUSIC_INSTRUCTIONS = """\
 Music:
 - You can control music in this Discord server's voice channel with the play_music tool: \
-play one of the listed radio stations, skip, stop, or show the queue. Never say you \
-cannot play or control music.
+play one of the listed radio stations, play a song from the server's uploaded library \
+by title (play_track, when offered), skip, stop, or show the queue. Never say you cannot \
+play or control music.
 - Use it when the user asks for music or radio, or to stop, skip or check it; pick the \
 station that best fits (e.g. "something chill" -> chill, "เพลงแจ๊ส" -> jazz).
 - The bot carries out each play_music call and reports the outcome as the call's result \

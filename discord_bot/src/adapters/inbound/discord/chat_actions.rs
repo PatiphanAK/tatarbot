@@ -18,6 +18,7 @@ use crate::domain::{
 };
 
 use super::presenter;
+use crate::adapters::outbound::url_resolver::looks_like_url;
 
 /// More would let one message queue up a burst of commands.
 pub const MAX_ACTIONS: usize = 2;
@@ -25,12 +26,14 @@ const MAX_DETAIL_CHARS: usize = 300;
 /// Bound on conversations with unreported outcomes.
 const MAX_PENDING: usize = 1_000;
 
-/// What the agent may ask for (the configured stations), what is playing now,
-/// and how the previous turn's actions turned out.
+/// What the agent may ask for (the configured stations; library songs when
+/// `library_hints` is `Some`), what is playing now, and how the previous
+/// turn's actions turned out.
 pub fn offer(
     music: &dyn MusicService,
     state: MusicState,
     results: Vec<ActionReport>,
+    library_hints: Option<Vec<String>>,
 ) -> ClientTools {
     ClientTools {
         music_stations: music
@@ -43,6 +46,8 @@ pub fn offer(
             .collect(),
         music_state: Some(state),
         music_results: results,
+        music_library: library_hints.is_some(),
+        music_library_hints: library_hints.unwrap_or_default(),
     }
 }
 
@@ -91,6 +96,20 @@ pub async fn execute(
         let result = match action {
             ChatAction::PlayStation(name) => music
                 .play_station(ctx, name)
+                .await
+                .map(|outcome| presenter::play_outcome(&outcome)),
+            // A title for the library search only: /play would fetch a link,
+            // and that must never be reachable from chat.
+            ChatAction::PlayTrack(title) if looks_like_url(title) => {
+                tracing::warn!("refused a link requested through chat");
+                outcomes.push(Outcome {
+                    action: action.clone(),
+                    result: Err(presenter::CHAT_LINK_REFUSED.to_owned()),
+                });
+                continue;
+            }
+            ChatAction::PlayTrack(title) => music
+                .play(ctx, title)
                 .await
                 .map(|outcome| presenter::play_outcome(&outcome)),
             ChatAction::Skip => music
@@ -224,8 +243,25 @@ mod tests {
 
     #[async_trait]
     impl MusicService for FakeMusic {
-        async fn play(&self, _: PlayContext, _: &str) -> Result<PlayOutcome, MusicError> {
-            unreachable!("chat never plays arbitrary queries")
+        async fn play(&self, ctx: PlayContext, query: &str) -> Result<PlayOutcome, MusicError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("play_track {query}"));
+            ctx.user_channel.ok_or(MusicError::NotInVoice)?;
+            if query.to_lowercase().contains("boys") {
+                Ok(PlayOutcome::Queued {
+                    track: TrackInfo {
+                        live: false,
+                        ..track("Boys Dont Cry")
+                    },
+                    position: 1,
+                })
+            } else {
+                Err(MusicError::Resolve(
+                    crate::application::ports::ResolveError::NotFound(query.into()),
+                ))
+            }
         }
         async fn play_station(
             &self,
@@ -272,7 +308,8 @@ mod tests {
 
     #[test]
     fn offers_the_configured_stations() {
-        let tools = offer(&FakeMusic::new(), MusicState::default(), Vec::new());
+        let tools = offer(&FakeMusic::new(), MusicState::default(), Vec::new(), None);
+        assert!(!tools.music_library);
         assert_eq!(
             tools.music_stations,
             [StationOffer {
@@ -409,5 +446,48 @@ mod tests {
         assert_eq!(state.channel.as_deref(), Some("room-10"));
         assert_eq!(state.queue[0].title, "Lo-fi beats");
         assert!(state.queue[0].live);
+    }
+
+    #[test]
+    fn offers_the_library_with_hints() {
+        let hints = vec!["Boys Dont Cry".to_owned()];
+        let tools = offer(
+            &FakeMusic::new(),
+            MusicState::default(),
+            Vec::new(),
+            Some(hints),
+        );
+        assert!(tools.music_library);
+        assert_eq!(tools.music_library_hints, ["Boys Dont Cry"]);
+    }
+
+    #[tokio::test]
+    async fn songs_are_found_in_the_library() {
+        let music = FakeMusic::new();
+
+        let outcomes = execute(&music, in_voice(), &[ChatAction::PlayTrack("boys".into())]).await;
+
+        assert_eq!(*music.calls.lock().unwrap(), ["play_track boys"]);
+        assert!(compose("", &outcomes)[0].starts_with("➕ Queued #1: **Boys Dont Cry**"));
+        let report = &reports(&outcomes)[0];
+        assert!(report.ok && report.detail.starts_with("➕ Queued #1: Boys Dont Cry"));
+
+        let missing = execute(&music, in_voice(), &[ChatAction::PlayTrack("xyz".into())]).await;
+        assert!(compose("", &missing)[0].contains("Nothing in this server's library matches"));
+    }
+
+    #[tokio::test]
+    async fn links_are_never_played_from_chat() {
+        let music = FakeMusic::new();
+        let link = ChatAction::PlayTrack("https://evil.example/a.mp3".into());
+
+        let outcomes = execute(&music, in_voice(), &[link]).await;
+
+        assert!(
+            music.calls.lock().unwrap().is_empty(),
+            "music.play must not be called"
+        );
+        assert_eq!(compose("", &outcomes), [presenter::CHAT_LINK_REFUSED]);
+        assert!(!reports(&outcomes)[0].ok);
     }
 }

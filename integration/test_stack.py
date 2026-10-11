@@ -101,7 +101,8 @@ def backend_up():
     check(
         "music request returns an action, not text",
         status == 200
-        and body.get("actions") == [{"type": "play_music", "action": "play", "station": "lofi"}]
+        and body.get("actions")
+        == [{"type": "play_music", "action": "play", "station": "lofi", "track": None}]
         and body.get("message") == "",
         body,
     )

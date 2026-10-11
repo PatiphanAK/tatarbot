@@ -110,6 +110,9 @@ mod tests {
                 .into_iter()
                 .collect())
         }
+        async fn recent(&self, _: GuildId, _: usize) -> Result<Vec<LibraryTrack>, LibraryError> {
+            Ok(Vec::new())
+        }
         fn object_key(&self, hash: &ContentHash) -> String {
             hash.object_key("library/")
         }
