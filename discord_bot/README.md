@@ -4,6 +4,7 @@ The Discord application (Rust, Serenity + Songbird): slash commands, voice playb
 server library, and chat forwarded to the [agent runtime](../agent_runtime/). It never calls a
 model itself. How playback, radio, uploads, search and the security measures work, and why,
 is in the [top-level README](../README.md#how-it-works); this page is about running it.
+Code-level design notes live in [`docs/`](docs/README.md).
 
 ## Layout
 
