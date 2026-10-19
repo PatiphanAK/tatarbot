@@ -17,9 +17,9 @@ variable "vpc_cidr" {
 }
 
 variable "cpu_architecture" {
-  description = "Fargate CPU architecture. Must match the images (CI builds linux/amd64)."
+  description = "Fargate CPU architecture. Must match the images (CI builds linux/arm64)."
   type        = string
-  default     = "X86_64"
+  default     = "ARM64"
 
   validation {
     condition     = contains(["X86_64", "ARM64"], var.cpu_architecture)

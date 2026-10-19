@@ -3,7 +3,8 @@
 # 1. Only commits already on main can be deployed.
 # 2. The image is tagged sha-<commit>; ECR tags are immutable, so an existing tag is reused
 #    and never rebuilt.
-# 3. A new task-definition revision is rendered from the live one with only the image
+# 3. Images are built for linux/arm64 only, matching var.cpu_architecture in infra/aws.
+# 4. A new task-definition revision is rendered from the live one with only the image
 #    changed; ECS rolls the service and the job waits for it to become stable.
 #
 # Requires, in the `production` environment (or repository) variables:
@@ -43,7 +44,8 @@ permissions:
 jobs:
   deploy:
     name: deploy ${{ inputs.ecs_service }}
-    runs-on: ubuntu-latest
+    # Images are arm64 (Fargate Graviton); building on an arm64 runner avoids QEMU.
+    runs-on: ubuntu-24.04-arm
     environment: production
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
@@ -105,7 +107,7 @@ jobs:
         if: steps.exists.outputs.found != 'true'
         with:
           context: ${{ inputs.context }}
-          platforms: linux/amd64
+          platforms: linux/arm64
           push: true
           tags: ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ steps.commit.outputs.tag }}
           labels: |

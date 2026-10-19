@@ -78,7 +78,7 @@ jobs:
 
   image:
     name: image build + smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm # same architecture as the deployed image
     steps:
       - uses: actions/checkout@v7
         with:
