@@ -416,7 +416,9 @@ RLHF/fine-tuning, multi-region, autoscaling the bot/runtime, streaming responses
 
 ## 8. Open questions
 
-1. Fargate (portfolio signal) or a single EC2/Lightsail host (lower cost)?
+1. Fargate (portfolio signal) or a single EC2/Lightsail host (lower cost)? *Decided
+   2026-10-19:* ECS on one Graviton EC2 instance by default, Fargate as a switch
+   (`launch_type`); see [`infra/aws/`](../../infra/aws/README.md).
 2. Which exact model and GPU tier, after cold-start and price checks?
 3. Should `models/serving/` and `models/infrastructure/` (currently empty) hold the Runpod
    and AWS config, or should AWS IaC live in `infra/aws/` as proposed? What is

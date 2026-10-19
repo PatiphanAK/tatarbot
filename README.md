@@ -49,7 +49,7 @@ and encodes Opus inside Songbird (see [Playback pipeline](#2-playback-pipeline))
 | Discord bot | Gateway connection, slash commands, voice playback, the server library; forwards chat to the runtime | [`discord_bot/`](discord_bot/) |
 | Agent runtime | Conversation history, system prompt, guardrails, Thai/English replies, ReAct web-search agent; HTTP API for the bot | [`agent_runtime/`](agent_runtime/) |
 | Model inference | vLLM serving: local GPU (Docker Compose) and a Runpod Serverless template; endpoint smoke test | [`model-inference/`](model-inference/) |
-| Infrastructure | Terraform for AWS (ECS Fargate, ECR, IAM, SSM wiring, S3, budget) and the CI/CD notes | [`infra/aws/`](infra/aws/) |
+| Infrastructure | Terraform for AWS (ECS on one Graviton EC2 instance or Fargate, ECR, IAM, SSM wiring, S3, budget) and the CI/CD notes | [`infra/aws/`](infra/aws/) |
 | Integration tests | The runtime image against a mock OpenAI-compatible model | [`integration/`](integration/) |
 | Design records | Inference provider ADR and the cloud inference design | [`docs/`](docs/) |
 
@@ -212,12 +212,17 @@ and each one fails if its lock is removed.
 
 ### 8. Deployment
 
-Designed for AWS; the Terraform validates offline but **has not been applied**.
+Designed for AWS. `terraform plan` succeeds against the account, but the configuration
+**has not been applied**.
 
-* **ECS Fargate, one task per service.** The bot and the runtime are separate services,
-  connected over Cloud Map private DNS. The bot runs exactly one task
-  (`minimumHealthyPercent=0`, `maximumPercent=100`): two bots on one token both answer every
-  command.
+* **ECS on one Graviton instance by default (t4g.micro, about $15/month 24/7).** The bot and
+  the runtime are separate ECS services, sharing the instance with bridge networking. The
+  bot calls the runtime's host port over the Docker bridge. `launch_type = "FARGATE"`
+  switches to one ARM64 task each, connected over Cloud Map private DNS, for about
+  $26.50/month. The bot runs exactly one task (`minimumHealthyPercent=0`,
+  `maximumPercent=100`): two bots on one token both answer every command. Costs,
+  assumptions and the start/stop schedule are in
+  [`infra/aws/`](infra/aws/README.md#cost-ap-southeast-1).
 * **SSM Parameter Store** (SecureString) for secrets, read by per-service execution roles.
   The bot's only task role is scoped to its library prefix in S3.
 * **Supabase** (free tier, Singapore) for library metadata, through the Supavisor pooler in
@@ -225,9 +230,17 @@ Designed for AWS; the Terraform validates offline but **has not been applied**.
   6 hours, because Supabase pauses free projects without database activity.
 * **S3** for library audio (RustFS locally).
 
-*Why not EC2:* host patching, access and deploys would be hand-rolled; Fargate gives
-immutable images and IAM-scoped secrets at similar complexity. *Why not SQLite (or SQLite on
-EFS):* Fargate disks are wiped on every deploy, and EFS adds cost, Terraform and locking
+*Why EC2 by default:* for one small community, Fargate's per-task price plus one IPv4
+address per task costs about 75% more than one shared instance. The usual objections to
+EC2 are handled by ECS and the ASG:
+- **Patching:** applying a new ECS-optimized AMI replaces the instance.
+- **Access:** Session Manager, no SSH.
+- **Deploys:** the same image-swap workflow as Fargate.
+
+The price is availability: one instance is a single point of failure for both services.
+*Why not Lambda for the bot:* Songbird holds the gateway WebSocket and a UDP voice session
+for as long as music plays. *Why not SQLite (or SQLite on EFS):* task and instance disks
+are wiped on every deploy or replacement, and EFS adds cost, Terraform and locking
 caveats; Supabase's free Postgres is managed and survives deploys. *Why not EFS for audio:*
 S3 is cheaper, needs no mount, and presigned URLs let Songbird stream objects directly.
 

@@ -6,9 +6,16 @@ model_name     = "<served-model-name>"
 
 # runtime_extra_environment = { MODEL_ENABLE_THINKING = "false", MAX_HISTORY_MESSAGES = "20" }
 
+# Compute: one Graviton instance for both services (default), or Fargate tasks.
+# launch_type       = "EC2"        # or "FARGATE"
+# ec2_instance_type = "t4g.micro"  # 1 GiB; t4g.small (2 GiB) for headroom
+# Optional on-hours (the instance and its volume exist only while on), cron in time_zone:
+# ec2_schedule = { start = "0 18 * * *", stop = "0 23 * * *", time_zone = "Asia/Bangkok" }
+
 # Leave at 0 for the first apply; raise to 1 after the first deploy pushed images.
 runtime_desired_count = 0
 discord_desired_count = 0
 
-# budget_email = "you@example.com"
+# budget_email     = "you@example.com"
+# budget_limit_usd = 20  # EC2 24/7 is ~$15/month; ~$3.70 with 5 h/day on-hours (README)
 # create_github_oidc_provider = false   # if the account already has GitHub's OIDC provider

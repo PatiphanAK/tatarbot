@@ -16,8 +16,19 @@ variable "vpc_cidr" {
   default     = "10.40.0.0/16"
 }
 
+variable "launch_type" {
+  description = "EC2: both services on one Graviton instance (cheapest always-on). FARGATE: one task each."
+  type        = string
+  default     = "EC2"
+
+  validation {
+    condition     = contains(["EC2", "FARGATE"], var.launch_type)
+    error_message = "launch_type must be EC2 or FARGATE."
+  }
+}
+
 variable "cpu_architecture" {
-  description = "Fargate CPU architecture. Must match the images (CI builds linux/arm64)."
+  description = "CPU architecture of the tasks (and of the EC2 instance). Must match the images (CI builds linux/arm64)."
   type        = string
   default     = "ARM64"
 
@@ -52,23 +63,96 @@ variable "discord_desired_count" {
 }
 
 variable "runtime_cpu" {
-  type    = number
-  default = 256
+  description = "Fargate task CPU units. Unused on EC2 (containers share the instance)."
+  type        = number
+  default     = 256
 }
 
 variable "runtime_memory" {
-  type    = number
-  default = 512
+  description = "Fargate task memory (MiB); on EC2, the container's hard limit."
+  type        = number
+  default     = 512
+}
+
+variable "runtime_memory_reservation" {
+  description = "EC2 only: memory (MiB) ECS reserves for placement. Measured idle: ~70 MiB."
+  type        = number
+  default     = 192
 }
 
 variable "discord_cpu" {
-  type    = number
-  default = 256
+  description = "Fargate task CPU units. Unused on EC2 (containers share the instance)."
+  type        = number
+  default     = 256
 }
 
 variable "discord_memory" {
-  type    = number
-  default = 512
+  description = "Fargate task memory (MiB); on EC2, the container's hard limit. Includes ffmpeg during uploads."
+  type        = number
+  default     = 512
+}
+
+variable "discord_memory_reservation" {
+  description = "EC2 only: memory (MiB) ECS reserves for placement."
+  type        = number
+  default     = 192
+}
+
+# ---- EC2 capacity (launch_type = "EC2")
+
+variable "ec2_instance_type" {
+  description = "Container instance type. t4g.micro (1 GiB) fits both services; t4g.nano (0.5 GiB) does not."
+  type        = string
+  default     = "t4g.micro"
+}
+
+variable "ec2_cpu_credits" {
+  description = "T-instance credit mode. unlimited never throttles but bills sustained use above baseline; standard caps cost and throttles."
+  type        = string
+  default     = "unlimited"
+
+  validation {
+    condition     = contains(["standard", "unlimited"], var.ec2_cpu_credits)
+    error_message = "ec2_cpu_credits must be standard or unlimited."
+  }
+}
+
+variable "ec2_root_volume_gb" {
+  description = "Root gp3 volume. The ECS-optimized AL2023 AMI snapshot is 30 GB, the minimum."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.ec2_root_volume_gb >= 30
+    error_message = "ec2_root_volume_gb must be at least 30 (the AMI snapshot size)."
+  }
+}
+
+variable "ec2_desired_capacity" {
+  description = "Instances to run: 1, or 0 to stop everything (the instance and its volume are deleted)."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = contains([0, 1], var.ec2_desired_capacity)
+    error_message = "ec2_desired_capacity must be 0 or 1."
+  }
+}
+
+variable "ec2_schedule" {
+  description = "Optional daily on-hours, as cron in time_zone, e.g. { start = \"0 18 * * *\", stop = \"0 23 * * *\" }. null runs 24/7."
+  type = object({
+    start     = string
+    stop      = string
+    time_zone = optional(string, "Asia/Bangkok")
+  })
+  default = null
+}
+
+variable "ec2_docker_bridge_ip" {
+  description = "EC2 only: Docker bridge gateway on the instance, where the runtime's host port is reached."
+  type        = string
+  default     = "172.17.0.1"
 }
 
 # ---- Application configuration (non-secret). Secrets live in SSM, see ssm_prefix.
@@ -157,6 +241,12 @@ variable "log_retention_days" {
   default = 14
 }
 
+variable "ecr_keep_images" {
+  description = "Images kept per repository (the rollback window)."
+  type        = number
+  default     = 10
+}
+
 # ---- Deployment from GitHub Actions
 
 variable "github_repository" {
@@ -180,9 +270,9 @@ variable "create_github_oidc_provider" {
 # ---- Cost guard
 
 variable "budget_limit_usd" {
-  description = "Monthly AWS budget; alerts at 80% actual and 100% forecast."
+  description = "Monthly AWS budget; alerts at 80% actual and 100% forecast. EC2 24/7 is ~$15 (README)."
   type        = number
-  default     = 15
+  default     = 20
 }
 
 variable "budget_email" {
