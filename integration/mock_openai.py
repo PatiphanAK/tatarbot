@@ -71,7 +71,9 @@ class Handler(BaseHTTPRequestHandler):
                         "id": "chatcmpl-mock",
                         "object": "chat.completion",
                         "model": MODEL,
-                        "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+                        "choices": [
+                            {"index": 0, "message": message, "finish_reason": "tool_calls"}
+                        ],
                     },
                 )
 
