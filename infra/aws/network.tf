@@ -1,13 +1,18 @@
 # Dedicated VPC with two public subnets and no NAT gateway.
 #
-# Tasks get a public IPv4 address only for outbound traffic (Discord, the inference
-# provider, ECR, CloudWatch, SSM). Nothing is reachable from the internet: the bot's
-# security group has no ingress rules and the runtime's only admits the bot on its port.
+# The EC2 instance (launch_type = "EC2") or each Fargate task gets a public IPv4 address
+# only for outbound traffic (Discord gateway and voice, the inference provider, ECR,
+# CloudWatch, SSM). Nothing is reachable from the internet: no security group here has an
+# ingress rule from outside the VPC.
 # Private subnets + NAT gateway (or VPC endpoints) is the stricter alternative; it costs
 # more per month than the rest of this stack (see README).
 
 locals {
-  azs = slice(data.aws_availability_zones.available.names, 0, 2)
+  azs     = slice(data.aws_availability_zones.available.names, 0, 2)
+  ec2     = var.launch_type == "EC2"
+  fargate = !local.ec2
+
+  namespace = "${var.project}.internal"
 }
 
 resource "aws_vpc" "main" {
@@ -29,7 +34,7 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   availability_zone       = local.azs[count.index]
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
-  map_public_ip_on_launch = false # ECS assigns public IPs per service
+  map_public_ip_on_launch = false # the launch template / ECS assigns public IPs
 
   tags = { Name = "${var.project}-public-${local.azs[count.index]}" }
 }
@@ -57,36 +62,69 @@ resource "aws_default_security_group" "default" {
   vpc_id = aws_vpc.main.id
 }
 
+# ---- EC2: one security group for the container instance. Both tasks use bridge
+# networking, so they share it. The bot reaches the runtime's host port over the Docker
+# bridge on the instance itself; no rule admits it from the network.
+
+resource "aws_security_group" "ecs_host" {
+  count = local.ec2 ? 1 : 0
+
+  name        = "${var.project}-ecs-host"
+  description = "ECS container instance: no inbound, outbound only"
+  vpc_id      = aws_vpc.main.id
+}
+
+resource "aws_vpc_security_group_egress_rule" "ecs_host_all" {
+  count = local.ec2 ? 1 : 0
+
+  security_group_id = aws_security_group.ecs_host[0].id
+  description       = "Discord gateway and voice, inference provider, ECR, CloudWatch, SSM"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+# ---- Fargate: one security group per task (awsvpc) and Cloud Map for bot -> runtime.
+
 resource "aws_security_group" "discord" {
+  count = local.fargate ? 1 : 0
+
   name        = "${var.project}-discord"
   description = "Discord bot: no inbound, outbound only"
   vpc_id      = aws_vpc.main.id
 }
 
 resource "aws_vpc_security_group_egress_rule" "discord_all" {
-  security_group_id = aws_security_group.discord.id
+  count = local.fargate ? 1 : 0
+
+  security_group_id = aws_security_group.discord[0].id
   description       = "Discord gateway, runtime, ECR, CloudWatch, SSM"
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
 }
 
 resource "aws_security_group" "runtime" {
+  count = local.fargate ? 1 : 0
+
   name        = "${var.project}-runtime"
   description = "Agent Runtime: inbound only from the bot"
   vpc_id      = aws_vpc.main.id
 }
 
 resource "aws_vpc_security_group_ingress_rule" "runtime_from_discord" {
-  security_group_id            = aws_security_group.runtime.id
+  count = local.fargate ? 1 : 0
+
+  security_group_id            = aws_security_group.runtime[0].id
   description                  = "Bot -> runtime HTTP"
   ip_protocol                  = "tcp"
   from_port                    = var.runtime_port
   to_port                      = var.runtime_port
-  referenced_security_group_id = aws_security_group.discord.id
+  referenced_security_group_id = aws_security_group.discord[0].id
 }
 
 resource "aws_vpc_security_group_egress_rule" "runtime_all" {
-  security_group_id = aws_security_group.runtime.id
+  count = local.fargate ? 1 : 0
+
+  security_group_id = aws_security_group.runtime[0].id
   description       = "Inference provider, ECR, CloudWatch, SSM"
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
@@ -95,16 +133,20 @@ resource "aws_vpc_security_group_egress_rule" "runtime_all" {
 # Private DNS for service discovery: runtime.<project>.internal resolves to the runtime
 # task's private IP inside this VPC only.
 resource "aws_service_discovery_private_dns_namespace" "main" {
-  name        = "${var.project}.internal"
+  count = local.fargate ? 1 : 0
+
+  name        = local.namespace
   description = "Private service discovery for ${var.project}"
   vpc         = aws_vpc.main.id
 }
 
 resource "aws_service_discovery_service" "runtime" {
+  count = local.fargate ? 1 : 0
+
   name = "runtime"
 
   dns_config {
-    namespace_id   = aws_service_discovery_private_dns_namespace.main.id
+    namespace_id   = aws_service_discovery_private_dns_namespace.main[0].id
     routing_policy = "MULTIVALUE"
 
     dns_records {

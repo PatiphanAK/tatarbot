@@ -44,7 +44,7 @@ permissions:
 jobs:
   deploy:
     name: deploy ${{ inputs.ecs_service }}
-    # Images are arm64 (Fargate Graviton); building on an arm64 runner avoids QEMU.
+    # Images are arm64 (Graviton, EC2 or Fargate); building on an arm64 runner avoids QEMU.
     runs-on: ubuntu-24.04-arm
     environment: production
     env:

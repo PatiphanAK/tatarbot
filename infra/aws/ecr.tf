@@ -37,11 +37,11 @@ resource "aws_ecr_lifecycle_policy" "service" {
       },
       {
         rulePriority = 2
-        description  = "Keep the 20 most recent images (rollback window)"
+        description  = "Keep the ${var.ecr_keep_images} most recent images (rollback window)"
         selection = {
           tagStatus   = "any"
           countType   = "imageCountMoreThan"
-          countNumber = 20
+          countNumber = var.ecr_keep_images
         }
         action = { type = "expire" }
       },
