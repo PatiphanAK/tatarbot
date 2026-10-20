@@ -144,10 +144,12 @@ resource "aws_launch_template" "ecs" {
 resource "aws_autoscaling_group" "ecs" {
   count = local.ec2 ? 1 : 0
 
-  name                      = "${var.project}-ecs"
-  min_size                  = 0
-  max_size                  = 1
-  desired_capacity          = var.ec2_desired_capacity
+  name     = "${var.project}-ecs"
+  min_size = 0
+  max_size = 1
+  # With a schedule, the scheduled actions own the instance count and Terraform leaves it
+  # alone (null keeps the current value; a new group starts at min_size 0).
+  desired_capacity          = var.ec2_schedule == null ? var.ec2_desired_capacity : null
   vpc_zone_identifier       = aws_subnet.public[*].id
   health_check_type         = "EC2"
   health_check_grace_period = 120
@@ -175,8 +177,8 @@ resource "aws_autoscaling_group" "ecs" {
 
 # Optional daily on-hours. Off means the instance and its volume are deleted; the ECS
 # services keep desired count 1 and their tasks start again when the instance registers.
-# A `terraform apply` during off-hours sets the capacity back to ec2_desired_capacity
-# until the next scheduled stop.
+# Terraform then ignores ec2_desired_capacity, so an apply never starts or stops the
+# instance; outside the schedule, use `aws autoscaling set-desired-capacity`.
 
 resource "aws_autoscaling_schedule" "start" {
   count = local.ec2 && var.ec2_schedule != null ? 1 : 0

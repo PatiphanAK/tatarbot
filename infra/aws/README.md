@@ -244,8 +244,11 @@ The images must be `linux/arm64` (CI builds them that way) to match `cpu_archite
   The next `apply` resets it.
 * **Only the bot or only chat:** set that service's desired count to 0 and apply.
 * **On-hours:** `ec2_schedule = { start = "0 18 * * *", stop = "0 23 * * *" }` (cron in
-  `time_zone`, default `Asia/Bangkok`). An `apply` during off-hours starts the instance
-  until the next scheduled stop.
+  `time_zone`, default `Asia/Bangkok`). Start a few minutes early: boot and task start take
+  about 2–3 minutes. With a schedule, Terraform ignores `ec2_desired_capacity` and an
+  `apply` never starts or stops the instance. To run outside the hours, use
+  `aws autoscaling set-desired-capacity --auto-scaling-group-name tatarbot-ecs --desired-capacity 1`,
+  and the next scheduled stop ends it.
   - The deploy workflow waits for the service to become stable, so deploy during on-hours.
   - The ASG terminates the instance without draining it. Tasks get Docker's shutdown
     signal, and a reply still being generated at that moment is lost.

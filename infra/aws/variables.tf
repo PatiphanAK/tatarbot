@@ -129,7 +129,7 @@ variable "ec2_root_volume_gb" {
 }
 
 variable "ec2_desired_capacity" {
-  description = "Instances to run: 1, or 0 to stop everything (the instance and its volume are deleted)."
+  description = "Instances to run: 1, or 0 to stop everything (the instance and its volume are deleted). Ignored when ec2_schedule is set."
   type        = number
   default     = 1
 
