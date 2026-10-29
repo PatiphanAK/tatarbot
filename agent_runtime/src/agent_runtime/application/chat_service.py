@@ -1,18 +1,21 @@
 """Chat use case: history + system prompt -> SearchAgent (ModelPort + SearchPort).
 
 Around the agent: the reply language is detected per turn and stated in the system
-message, and the guardrails in `agent_runtime.domain.guardrails` check input and output.
-Only the user message and the final reply are stored; search steps are not.
+message, knowledge base excerpts relevant to the message (with a `KnowledgeBase`) are added
+to it, and the guardrails in `agent_runtime.domain.guardrails` check input and output.
+Only the user message and the final reply are stored; search steps and excerpts are not.
 """
 
 import asyncio
 import logging
 import time
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 from agent_runtime.application.agent import AgentSettings, SearchAgent
+from agent_runtime.application.knowledge import KnowledgeBase
 from agent_runtime.application.ports import ConversationStore, ModelPort, SearchPort
 from agent_runtime.domain import (
     ChatMessage,
@@ -20,6 +23,7 @@ from agent_runtime.domain import (
     InvalidInputError,
     Language,
     ModelResponseError,
+    RetrievedChunk,
     Role,
     SearchResult,
     detect_language,
@@ -82,8 +86,10 @@ class ChatService:
         store: ConversationStore,
         settings: ChatSettings,
         search: SearchPort | None = None,
+        knowledge: KnowledgeBase | None = None,
     ):
         self._store = store
+        self._knowledge = knowledge
         self._settings = settings
         self._agent = SearchAgent(
             model,
@@ -131,9 +137,11 @@ class ChatService:
             history = await self._store.load(conversation_id)
             recent = self._recent(history)
             language = detect_language(message) or _conversation_language(recent)
+            knowledge = await self._knowledge.retrieve(message) if self._knowledge else []
             user = ChatMessage(Role.USER, message)
+            system = self._system_message(language, client_tools, knowledge)
             messages = (
-                ChatMessage(Role.SYSTEM, self._system_message(language, client_tools)),
+                ChatMessage(Role.SYSTEM, system),
                 *recent,
                 user,
             )
@@ -175,11 +183,13 @@ class ChatService:
             )
         log.info(
             "chat turn completed conversation_id=%s request_id=%s history=%d language=%s "
-            "react_steps=%d searches=%d actions=%d model_calls=%d latency_ms=%d finish_reason=%s",
+            "knowledge=%d react_steps=%d searches=%d actions=%d model_calls=%d latency_ms=%d "
+            "finish_reason=%s",
             conversation_id,
             request_id,
             len(messages) - 2,
             language or "-",
+            len(knowledge),
             len(result.steps),
             result.searches,
             len(result.actions),
@@ -208,8 +218,15 @@ class ChatService:
             ]
             await self._store.replace_last(conversation_id, updated)
 
-    def _system_message(self, language: Language | None, client_tools: ClientTools) -> str:
+    def _system_message(
+        self,
+        language: Language | None,
+        client_tools: ClientTools,
+        knowledge: Sequence[RetrievedChunk] = (),
+    ) -> str:
         parts = [self._settings.system_prompt.rstrip()]
+        if excerpts := KnowledgeBase.instructions(knowledge):
+            parts.append(excerpts)
         if search := self._agent.instructions():
             parts.append(search)
         if client_tools.music:

@@ -3,7 +3,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from agent_runtime.domain import ChatMessage, InferenceRequest, InferenceResult, SearchResult
+from agent_runtime.domain import (
+    ChatMessage,
+    Chunk,
+    Document,
+    InferenceRequest,
+    InferenceResult,
+    RetrievedChunk,
+    SearchResult,
+)
 
 
 class ModelPort(ABC):
@@ -50,3 +58,54 @@ class SearchPort(ABC):
 
     async def aclose(self) -> None:  # noqa: B027 - optional hook
         """Release resources (connections...)."""
+
+
+class EmbeddingPort(ABC):
+    """Text -> vector, for any embedding model (an OpenAI-compatible server, a local
+    hashing embedder...). Implementations raise `EmbeddingError` on failure.
+
+    Queries and documents are separate calls because many models embed them differently
+    (an instruction or `query:` / `passage:` prefix).
+    """
+
+    @property
+    @abstractmethod
+    def identity(self) -> str:
+        """Names the vector space: two embedders with the same identity produce comparable
+        vectors. It must change with the model, dimensions or prefixes; stored vectors
+        with another identity are discarded."""
+
+    @abstractmethod
+    async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        """One vector per text, in order."""
+
+    @abstractmethod
+    async def embed_query(self, text: str) -> list[float]: ...
+
+    async def aclose(self) -> None:  # noqa: B027 - optional hook
+        """Release resources (connections...)."""
+
+
+class VectorStore(ABC):
+    """Holds the embedded chunks and finds the nearest ones.
+
+    In-memory today; pgvector or a vector database later without touching the pipeline.
+    """
+
+    @abstractmethod
+    async def replace(self, chunks: Sequence[Chunk], vectors: Sequence[list[float]]) -> None:
+        """Swap the whole index atomically; searches never see a half-built index."""
+
+    @abstractmethod
+    async def search(self, vector: list[float], top_k: int) -> list[RetrievedChunk]:
+        """Up to `top_k` chunks, closest first."""
+
+    @abstractmethod
+    async def count(self) -> int: ...
+
+
+class DocumentSource(ABC):
+    """Where knowledge documents come from (a directory today)."""
+
+    @abstractmethod
+    async def load(self) -> list[Document]: ...

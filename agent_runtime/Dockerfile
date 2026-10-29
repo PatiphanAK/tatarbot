@@ -15,6 +15,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.12-slim-trixie
 RUN useradd --system --uid 10001 --no-create-home app
 COPY --from=build /app/.venv /app/.venv
+# Starter knowledge base; used only with RAG_DOCS_DIR=/app/knowledge (or mount your own).
+COPY knowledge /app/knowledge
 # uvicorn reads UVICORN_* for its CLI options. Override UVICORN_HOST=127.0.0.1 when the
 # bot shares the network namespace (compose, ECS task) so the API stays off the network.
 ENV PATH=/app/.venv/bin:$PATH \

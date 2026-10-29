@@ -13,6 +13,10 @@ class ConfigError(Exception):
     pass
 
 
+# EMBEDDING_PROVIDER values; main.py maps each to an `EmbeddingPort` adapter.
+EMBEDDING_PROVIDERS = ("openai", "hash")
+
+
 @dataclass(frozen=True)
 class Settings:
     agent_api_key: str = field(repr=False)
@@ -35,6 +39,40 @@ class Settings:
     turn_timeout_seconds: float = 110.0
     max_history_messages: int = 20
     max_conversations: int = 10_000
+    # Knowledge base (RAG) is enabled when a documents directory is set.
+    rag_docs_dir: str | None = None
+    rag_cache_file: str | None = None
+    rag_chunk_chars: int = 1200
+    rag_chunk_overlap: int = 200
+    rag_top_k: int = 4
+    rag_min_score: float = 0.3
+    rag_max_context_chars: int = 4000
+    rag_timeout_seconds: float = 10.0
+    # Embedding model: "openai" (any OpenAI-compatible /embeddings API) or "hash" (offline).
+    embedding_provider: str = "openai"
+    embedding_base_url: str | None = None
+    embedding_model: str | None = None
+    embedding_api_key: str | None = field(default=None, repr=False)
+    embedding_dimensions: int | None = None
+    embedding_query_prefix: str = ""
+    embedding_document_prefix: str = ""
+    embedding_batch_size: int = 32
+    embedding_timeout_seconds: float = 30.0
+
+    def __post_init__(self):
+        if not self.rag_docs_dir:
+            return
+        if self.embedding_provider not in EMBEDDING_PROVIDERS:
+            raise ConfigError(
+                f"EMBEDDING_PROVIDER must be one of {', '.join(EMBEDDING_PROVIDERS)}, "
+                f"got {self.embedding_provider!r}"
+            )
+        if self.embedding_provider == "openai" and not self.embedding_model:
+            raise ConfigError("EMBEDDING_MODEL is required when RAG_DOCS_DIR is set")
+        if not 0 <= self.rag_chunk_overlap < self.rag_chunk_chars // 2:
+            raise ConfigError("RAG_CHUNK_OVERLAP must be below half of RAG_CHUNK_CHARS")
+        if self.rag_chunk_chars < 100:
+            raise ConfigError("RAG_CHUNK_CHARS must be at least 100")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -56,7 +94,42 @@ class Settings:
             turn_timeout_seconds=_parse("TURN_TIMEOUT_SECONDS", float, 110.0),
             max_history_messages=_parse("MAX_HISTORY_MESSAGES", int, 20),
             max_conversations=_parse("MAX_CONVERSATIONS", int, 10_000),
+            rag_docs_dir=_optional("RAG_DOCS_DIR"),
+            rag_cache_file=_optional("RAG_CACHE_FILE"),
+            rag_chunk_chars=_parse("RAG_CHUNK_CHARS", int, 1200),
+            rag_chunk_overlap=_parse("RAG_CHUNK_OVERLAP", int, 200),
+            rag_top_k=_parse("RAG_TOP_K", int, 4),
+            rag_min_score=_parse("RAG_MIN_SCORE", float, 0.3),
+            rag_max_context_chars=_parse("RAG_MAX_CONTEXT_CHARS", int, 4000),
+            rag_timeout_seconds=_parse("RAG_TIMEOUT_SECONDS", float, 10.0),
+            **_embedding_from_env(),
         )
+
+
+def _embedding_from_env() -> dict:
+    """The embedding backend defaults to the chat model's server. Its key defaults to
+    MODEL_API_KEY only then: a key is never sent to a host it was not configured for."""
+    base_url = _optional("EMBEDDING_BASE_URL")
+    api_key = _optional("EMBEDDING_API_KEY")
+    if base_url is None:
+        base_url = _optional("MODEL_BASE_URL")
+        api_key = api_key or _optional("MODEL_API_KEY")
+    return {
+        "embedding_provider": (_optional("EMBEDDING_PROVIDER") or "openai").lower(),
+        "embedding_base_url": base_url,
+        "embedding_model": _optional("EMBEDDING_MODEL"),
+        "embedding_api_key": api_key,
+        "embedding_dimensions": _parse("EMBEDDING_DIMENSIONS", int, None),
+        # Prefixes may end in a space or newline, so they are not stripped (\n is a newline).
+        "embedding_query_prefix": _raw("EMBEDDING_QUERY_PREFIX"),
+        "embedding_document_prefix": _raw("EMBEDDING_DOCUMENT_PREFIX"),
+        "embedding_batch_size": _parse("EMBEDDING_BATCH_SIZE", int, 32),
+        "embedding_timeout_seconds": _parse("EMBEDDING_TIMEOUT_SECONDS", float, 30.0),
+    }
+
+
+def _raw(key: str) -> str:
+    return os.environ.get(key, "").replace("\\n", "\n")
 
 
 def _optional(key: str) -> str | None:
