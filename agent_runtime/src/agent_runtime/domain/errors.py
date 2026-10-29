@@ -24,3 +24,8 @@ class ModelResponseError(ModelError):
 
 class SearchError(Exception):
     """The search provider failed. The agent reports it to the model; the turn goes on."""
+
+
+class EmbeddingError(Exception):
+    """The embedding backend failed or answered with unusable vectors. Retrieval is skipped
+    for that turn; a reload fails with 503."""
