@@ -33,6 +33,7 @@ flowchart LR
     chat -- "POST /v1/chat" --> runtime["agent_runtime (Python)<br/>ReAct agent, guardrails"]
     runtime --> model[(OpenAI-compatible model<br/>vLLM, Runpod, Qwen API)]
     runtime --> tavily[(Tavily web search)]
+    runtime -. "RAG, optional" .-> embed[(Embedding model<br/>any /embeddings API)]
     library --> pg[(Postgres<br/>Supabase / local)]
     library --> s3[(S3 / RustFS)]
     lib --> pg
@@ -47,11 +48,11 @@ and encodes Opus inside Songbird (see [Playback pipeline](#2-playback-pipeline))
 | Component | What it does | Directory |
 |---|---|---|
 | Discord bot | Gateway connection, slash commands, voice playback, the server library; forwards chat to the runtime | [`discord_bot/`](discord_bot/) |
-| Agent runtime | Conversation history, system prompt, guardrails, Thai/English replies, ReAct web-search agent; HTTP API for the bot | [`agent_runtime/`](agent_runtime/) |
+| Agent runtime | Conversation history, system prompt, guardrails, Thai/English replies, ReAct web-search agent, knowledge base (RAG) with a pluggable embedding model; HTTP API for the bot | [`agent_runtime/`](agent_runtime/) |
 | Model inference | vLLM serving: local GPU (Docker Compose) and a Runpod Serverless template; endpoint smoke test | [`model-inference/`](model-inference/) |
 | Infrastructure | Terraform for AWS (ECS on one Graviton EC2 instance or Fargate, ECR, IAM, SSM wiring, S3, budget) and the CI/CD notes | [`infra/aws/`](infra/aws/) |
 | Integration tests | The runtime image against a mock OpenAI-compatible model | [`integration/`](integration/) |
-| Design records | Inference provider ADR and the cloud inference design | [`docs/`](docs/) |
+| Design records | Inference provider ADR, the cloud inference design, the knowledge base (RAG) design | [`docs/`](docs/) |
 
 ## How it works
 
@@ -206,6 +207,12 @@ and each one fails if its lock is removed.
   current playback state (voice channel, what's playing, the station's current song), which
   the system message shows as data. *Why tool calls, not text notes:* with `[action] …` notes
   in history, a model started writing such notes instead of calling the tool.
+* **Knowledge base (RAG)**, optional: documents in `RAG_DOCS_DIR` are chunked along their
+  headings and embedded; each turn, the passages closest to the message go into the system
+  message as data. The embedding model is configuration: any OpenAI-compatible
+  `/embeddings` server, or an offline hashing embedder for development; changing it
+  re-indexes automatically. *Why per turn, not as a tool:* one embedding call instead of an
+  extra model round trip. See [docs/architecture/rag.md](docs/architecture/rag.md).
 * **Language:** each message is classified as Thai or English by script, and the system
   message tells the model which language to reply in
   (`agent_runtime/src/agent_runtime/domain/language.py`).

@@ -5,6 +5,7 @@ Nothing in here may import FastAPI, httpx, or know about Discord or vLLM.
 
 from agent_runtime.domain import guardrails
 from agent_runtime.domain.errors import (
+    EmbeddingError,
     InvalidInputError,
     ModelError,
     ModelRequestRejectedError,
@@ -23,11 +24,15 @@ from agent_runtime.domain.inference import (
     ToolCall,
     ToolSpec,
 )
+from agent_runtime.domain.knowledge import Chunk, Document, RetrievedChunk
 from agent_runtime.domain.language import Language, detect_language
 from agent_runtime.domain.search import SearchResult
 
 __all__ = [
     "ChatMessage",
+    "Chunk",
+    "Document",
+    "EmbeddingError",
     "GenerationParams",
     "InferenceRequest",
     "InferenceResult",
@@ -38,6 +43,7 @@ __all__ = [
     "ModelResponseError",
     "ModelTimeoutError",
     "ModelUnavailableError",
+    "RetrievedChunk",
     "Role",
     "SearchError",
     "SearchResult",
