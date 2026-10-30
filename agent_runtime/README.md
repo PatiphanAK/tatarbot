@@ -1,13 +1,14 @@
 # agent_runtime
 
 The service between the Discord bot and the model (Python, FastAPI, LangGraph). It owns
-conversation history, the system prompt, guardrails and reply language, and runs the ReAct
-web-search agent. It knows nothing about Discord; the bot knows nothing about the model. How
+conversation history, the system prompt, guardrails and reply language, runs the ReAct
+web-search agent, and answers from a knowledge base of documents (RAG, optional). It knows nothing about Discord; the bot knows nothing about the model. How
 the ReAct loop and the guardrails work, and why, is in the
 [top-level README](../README.md#7-agent-runtime); this page has the details.
 
 ```text
 discord_bot ──POST /v1/chat──▶ agent_runtime ──POST /chat/completions──▶ any OpenAI-compatible model
+                                     ├──▶ POST /embeddings ──▶ any embedding model (RAG, optional)
                                      └──▶ Tavily (web search, optional)
 ```
 
@@ -18,15 +19,17 @@ adapters/inbound/http_api.py      FastAPI: auth, validation, error mapping
         │
         ▼
 application/chat_service.py       ChatService: history, language, guardrails, sources
-        │
-        ▼
-application/agent.py              SearchAgent: ReAct loop  reason → act ⇄ observe
-        │            │                 │
-        ▼            ▼                 ▼
+        │                    └──────────────▶ application/knowledge.py  KnowledgeBase (RAG)
+        ▼                                          │             │              │
+application/agent.py              SearchAgent      │             │              │
+        │            │                 │           ▼             ▼              ▼
+        ▼            ▼                 ▼     DocumentSource  EmbeddingPort  VectorStore
  ConversationStore  ModelPort      SearchPort    application/ports.py (abstract)
-        │            │                 │
-        ▼            ▼                 ▼
- memory_store.py    vllm.py        tavily.py     adapters/outbound/
+        │            │                 │           │             │              │
+        ▼            ▼                 ▼           ▼             ▼              ▼
+ memory_store.py    vllm.py        tavily.py  file_documents  openai_embeddings memory_vectors
+                                                              hash_embeddings
+                                                              (+ embedding_cache)
 ```
 
 * `domain/inference.py` defines the generic contract: `InferenceRequest` (messages + params),
@@ -36,7 +39,29 @@ application/agent.py              SearchAgent: ReAct loop  reason → act ⇄ ob
   memory (`ConversationStore`), lost on restart, which is why the runtime runs one task.
 * `domain/language.py` and `domain/guardrails.py` are pure policies `ChatService` applies
   around the model call (see below).
-* `main.py` (`create_app`) is the composition root.
+* `main.py` (`create_app`) is the composition root; `build_embedder` picks the embedding
+  adapter from `EMBEDDING_PROVIDER`.
+
+## Knowledge base (RAG)
+
+On only with `RAG_DOCS_DIR`. The design, model choices, tuning and operations are in
+[docs/architecture/rag.md](../docs/architecture/rag.md); in short:
+
+* At startup (in the background) and on `POST /v1/knowledge/reload`, every `.md`/`.txt`
+  file under `RAG_DOCS_DIR` is split along its headings and paragraphs, embedded, and held
+  in memory. With `RAG_CACHE_FILE`, only new or changed chunks are re-embedded.
+* Each turn embeds the user's message, takes the `RAG_TOP_K` closest chunks scoring at
+  least `RAG_MIN_SCORE`, and adds them to the system message as excerpts marked as data, not
+  instructions. They are not stored in history. Turns without a good match get none.
+* **The embedding model is configuration.** `EMBEDDING_PROVIDER=openai` talks to any
+  OpenAI-compatible `/embeddings` API (vLLM, Ollama, TEI, LiteLLM, OpenAI, Alibaba Model
+  Studio) with `EMBEDDING_MODEL`, optional `EMBEDDING_DIMENSIONS` and model-specific
+  query/document prefixes; `hash` needs no model (development and tests). Changing the
+  model changes the index's `identity` and re-embeds everything once.
+* Retrieval never fails a turn: embedding errors and timeouts are logged and the turn goes
+  on without knowledge. Use a multilingual model (e.g. `bge-m3`, `Qwen3-Embedding`,
+  `text-embedding-v4`) so Thai questions find English documents and the other way round.
+* The image ships starter documents at `/app/knowledge` (`knowledge/`): how to use the bot.
 
 ## Web search agent (ReAct) details
 
@@ -113,6 +138,8 @@ classifier model behind its own port would be the next step.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/v1/chat` | Bearer | `{message, conversation_id, client_tools?}` → `{message, conversation_id, actions}` |
+| `GET` | `/v1/knowledge` | Bearer | Knowledge base status: `{documents, chunks, embedder, indexed_at, duration_ms}` (404 when disabled) |
+| `POST` | `/v1/knowledge/reload` | Bearer | Re-read and re-index the documents; same body, or 503 if the embedding backend fails |
 | `GET` | `/health` | – | Liveness: the process is up |
 | `GET` | `/ready` | – | Readiness: the backend is reachable and serves `MODEL_NAME` (otherwise 503) |
 
@@ -126,6 +153,7 @@ are never returned to the caller.
 | Backend rejected the request (4xx) or returned a malformed/empty reply | 502 |
 | Backend unreachable, 5xx, or 429 | 503 |
 | Backend timed out | 504 |
+| Embedding backend failed during a knowledge reload | 503 |
 | Unexpected error | 500 |
 
 ## Configuration
@@ -145,6 +173,17 @@ are never returned to the caller.
 | `SYSTEM_PROMPT`, `SYSTEM_PROMPT_FILE` | no | `prompts/system.md` | Override the system prompt |
 | `GUARDRAILS_ENABLED` | no | `true` | Input/output guardrails |
 | `MAX_HISTORY_MESSAGES`, `MAX_CONVERSATIONS` | no | `20`, `10000` | History window and memory bound |
+| `RAG_DOCS_DIR` | no | – | Enables the knowledge base: directory of `.md`/`.txt` documents (`/app/knowledge` in the image) |
+| `RAG_CACHE_FILE` | no | – | JSON file keeping document embeddings across restarts and reloads |
+| `RAG_TOP_K`, `RAG_MIN_SCORE`, `RAG_MAX_CONTEXT_CHARS` | no | `4`, `0.3`, `4000` | Chunks per turn, minimum cosine similarity (model-specific), excerpt budget |
+| `RAG_CHUNK_CHARS`, `RAG_CHUNK_OVERLAP` | no | `1200`, `200` | Chunk size; overlap when a long paragraph is cut |
+| `RAG_TIMEOUT_SECONDS` | no | `10` | Query embedding + search per turn |
+| `EMBEDDING_PROVIDER` | no | `openai` | `openai` (any OpenAI-compatible `/embeddings`) or `hash` (offline, lexical) |
+| `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY` | no | `MODEL_BASE_URL`, `MODEL_API_KEY` | Embedding API root and key; `MODEL_API_KEY` is used only when the base URL is defaulted too |
+| `EMBEDDING_MODEL` | with `openai` | – | Embedding model id, e.g. `bge-m3`, `text-embedding-v4` |
+| `EMBEDDING_DIMENSIONS` | no | model's own (`512` for `hash`) | Shorter vectors, for models that support it |
+| `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_DOCUMENT_PREFIX` | no | empty | Model-specific input prefixes (`query: ` / `passage: ` for E5); `\n` is a newline |
+| `EMBEDDING_BATCH_SIZE`, `EMBEDDING_TIMEOUT_SECONDS` | no | `32`, `30` | Texts per request when indexing; per request |
 
 Qwen3 is a reasoning model. By default the runtime sends
 `chat_template_kwargs.enable_thinking=false` and strips any `<think>…</think>` from replies.
@@ -154,8 +193,8 @@ everything is lost on restart. Turns within one conversation are serialized per 
 
 ## RAG database
 
-The RAG store lives in Postgres with pgvector, schema `rag` (nothing reads or writes it
-yet). Migrations are plain SQL in `src/agent_runtime/db/migrations/`, named
+A Postgres + pgvector schema `rag` for a persistent vector store. Nothing reads or writes
+it yet: the knowledge base above still uses `InMemoryVectorStore`. Migrations are plain SQL in `src/agent_runtime/db/migrations/`, named
 `<version>_<description>.sql` like the bot's sqlx ones, and shipped in the image.
 
 | Table | Holds |

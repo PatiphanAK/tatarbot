@@ -5,10 +5,13 @@ Wire contract (unchanged from TatarBot's `AgentPort` HTTP adapter):
     POST /v1/chat  {"message": str, "conversation_id": str}
     200 {"message": str, "conversation_id": str}
     4xx/5xx {"error": str}
+
+Knowledge base (operators, same key): GET /v1/knowledge, POST /v1/knowledge/reload.
 """
 
 import logging
 import secrets
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -17,8 +20,9 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
 
-from agent_runtime.application import ChatService, ModelPort
+from agent_runtime.application import ChatService, IndexStatus, KnowledgeBase, ModelPort
 from agent_runtime.domain import (
+    EmbeddingError,
     InvalidInputError,
     ModelError,
     ModelRequestRejectedError,
@@ -139,6 +143,25 @@ class ErrorBody(BaseModel):
     error: str
 
 
+class KnowledgeStatusBody(BaseModel):
+    documents: int
+    chunks: int
+    # Identity of the embedding model the index was built with.
+    embedder: str
+    indexed_at: datetime | None
+    duration_ms: int
+
+    @classmethod
+    def of(cls, status: IndexStatus) -> "KnowledgeStatusBody":
+        return cls(
+            documents=status.documents,
+            chunks=status.chunks,
+            embedder=status.embedder,
+            indexed_at=status.indexed_at,
+            duration_ms=status.duration_ms,
+        )
+
+
 class ApiError(Exception):
     def __init__(self, status_code: int, message: str, headers: dict[str, str] | None = None):
         self.status_code = status_code
@@ -163,8 +186,19 @@ def _require_api_key(api_key: str):
     return check
 
 
-def build_router(chat_service: ChatService, model: ModelPort, api_key: str) -> APIRouter:
+def build_router(
+    chat_service: ChatService,
+    model: ModelPort,
+    api_key: str,
+    knowledge: KnowledgeBase | None = None,
+) -> APIRouter:
     router = APIRouter()
+    authorized = [Depends(_require_api_key(api_key))]
+
+    def knowledge_base() -> KnowledgeBase:
+        if knowledge is None:
+            raise ApiError(404, "knowledge base disabled")
+        return knowledge
 
     @router.post(
         "/v1/chat",
@@ -185,6 +219,26 @@ def build_router(chat_service: ChatService, model: ModelPort, api_key: str) -> A
                 for a in reply.actions
             ],
         )
+
+    @router.get(
+        "/v1/knowledge",
+        response_model=KnowledgeStatusBody,
+        dependencies=authorized,
+        responses={code: {"model": ErrorBody} for code in (401, 404)},
+    )
+    async def knowledge_status() -> KnowledgeStatusBody:
+        """What is indexed now; `indexed_at` is null until the first index is built."""
+        return KnowledgeStatusBody.of(knowledge_base().status)
+
+    @router.post(
+        "/v1/knowledge/reload",
+        response_model=KnowledgeStatusBody,
+        dependencies=authorized,
+        responses={code: {"model": ErrorBody} for code in (401, 404, 503)},
+    )
+    async def knowledge_reload() -> KnowledgeStatusBody:
+        """Re-read the documents and re-index; unchanged chunks come from the cache."""
+        return KnowledgeStatusBody.of(await knowledge_base().refresh())
 
     @router.get("/health")
     async def health() -> dict[str, str]:
@@ -229,6 +283,11 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(InvalidInputError)
     async def invalid_input(_: Request, exc: InvalidInputError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, 422)
+
+    @app.exception_handler(EmbeddingError)
+    async def embedding_error(_: Request, exc: EmbeddingError) -> JSONResponse:
+        log.warning("embedding error: %s", exc)
+        return JSONResponse({"error": "embedding unavailable"}, 503)
 
     @app.exception_handler(ModelError)
     async def model_error(_: Request, exc: ModelError) -> JSONResponse:
