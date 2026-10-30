@@ -5,9 +5,11 @@ ENV_FILE ?= .env
 LOAD_ENV := set -a; [ -f $(ENV_FILE) ] && . ./$(ENV_FILE); set +a
 UVICORN  := uv run uvicorn --factory agent_runtime.main:create_app
 IMAGE    ?= tatarbot-agent-runtime:local
+# Local Postgres + pgvector from ../compose.yaml (shared with the bot's music library).
+DEV_DB   ?= postgres://tatarbot:tatarbot-local@127.0.0.1:$${POSTGRES_PORT:-55432}/tatarbot
 
 .DEFAULT_GOAL := help
-.PHONY: help install env run dev test lint fmt check smoke image image-run
+.PHONY: help install env run dev test lint fmt check smoke db-up migrate test-db image image-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -41,6 +43,15 @@ fmt: ## Format and auto-fix
 	uv run ruff check --fix .
 
 check: lint test ## Lint + tests
+
+db-up: ## Start local Postgres + pgvector (compose)
+	docker compose -f ../compose.yaml up -d --wait postgres
+
+migrate: ## Apply the RAG migrations to DATABASE_URL (from .env)
+	@$(LOAD_ENV); uv run python -m agent_runtime.db.migrate
+
+test-db: db-up ## Tests incl. migrations against local Postgres (fresh database per test)
+	TEST_DATABASE_URL=$(DEV_DB) uv run pytest -q
 
 smoke: ## Call a running runtime: /health, /ready, /v1/chat
 	@$(LOAD_ENV); URL=http://$${HOST:-127.0.0.1}:$${PORT:-8080}; \

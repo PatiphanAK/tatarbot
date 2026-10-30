@@ -1,5 +1,6 @@
-# CI for agent_runtime only: lint, unit tests, image build and integration tests against a
-# mock OpenAI-compatible model. No secrets, no Discord, no GPU, no AWS.
+# CI for agent_runtime only: lint, unit tests (incl. the RAG migrations against Postgres +
+# pgvector), image build and integration tests against a mock OpenAI-compatible model.
+# No secrets, no Discord, no GPU, no AWS.
 
 name: CI runtime
 
@@ -32,6 +33,21 @@ jobs:
     defaults:
       run:
         working-directory: agent_runtime
+    # Migration tests create and drop a database per test. Same image as compose.yaml.
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg17-trixie
+        env:
+          POSTGRES_USER: tatarbot
+          POSTGRES_PASSWORD: tatarbot-ci
+          POSTGRES_DB: tatarbot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tatarbot -d tatarbot"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://tatarbot:tatarbot-ci@127.0.0.1:5432/tatarbot
     steps:
       - uses: actions/checkout@v7
         with:
