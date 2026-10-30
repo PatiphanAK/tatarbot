@@ -63,8 +63,9 @@ services:
     restart: unless-stopped
 
   # Local stand-ins for Supabase Postgres and S3. Throwaway credentials, localhost only.
+  # pgvector for the runtime's RAG schema (`make -C agent_runtime migrate`).
   postgres:
-    image: postgres:17.10-alpine
+    image: pgvector/pgvector:0.8.1-pg17-trixie
     environment:
       POSTGRES_USER: tatarbot
       POSTGRES_PASSWORD: tatarbot-local

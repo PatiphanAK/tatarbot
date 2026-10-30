@@ -152,6 +152,32 @@ Qwen3 is a reasoning model. By default the runtime sends
 History is kept in memory: the last `MAX_HISTORY_MESSAGES` messages are sent per turn, and
 everything is lost on restart. Turns within one conversation are serialized per process.
 
+## RAG database
+
+The RAG store lives in Postgres with pgvector, schema `rag` (nothing reads or writes it
+yet). Migrations are plain SQL in `src/agent_runtime/db/migrations/`, named
+`<version>_<description>.sql` like the bot's sqlx ones, and shipped in the image.
+
+| Table | Holds |
+|---|---|
+| `rag.documents` | One row per `(namespace, source)`: title, `content_hash` (SHA-256 hex), `metadata` JSON |
+| `rag.chunks` | `ordinal`, `content`, `embedding vector(1024)` (bge-m3), `embedding_model`; deleted with their document |
+
+`chunks.embedding` has an HNSW index for cosine distance (`ORDER BY embedding <=> $1`).
+Changing the embedding model's dimension means a new migration and re-embedding.
+
+```sh
+make db-up     # local Postgres + pgvector from ../compose.yaml
+make migrate   # apply pending migrations to DATABASE_URL (.env)
+make test-db   # all tests, incl. migrations against local Postgres
+```
+
+`python -m agent_runtime.db.migrate` (in the image too) applies each pending file in its own
+transaction and records it with a checksum in `_agent_runtime_migrations`. It fails if an
+applied file was edited or is missing: never edit an applied migration, add a new one. An
+advisory lock serializes concurrent runs, so on Supabase use the direct or session-pooler
+URL, not the transaction pooler. The app does not migrate on startup.
+
 ## Development
 
 ```sh
