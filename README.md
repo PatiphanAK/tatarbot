@@ -5,7 +5,8 @@ agent that can search the web and replies in Thai or English, whichever you wrot
 voice channel it plays curated radio stations, direct audio links, and a per-server library
 of audio that members upload, through slash commands or just by asking in chat
 ("@TatarBot เปิดเพลงชิลๆ หน่อย"). This README explains how those pieces work and why they are
-built the way they are; each directory's README covers configuration and day-to-day use.
+built the way they are; each directory's README covers configuration and day-to-day use, and
+the [documentation map](docs/README.md) lists everything else.
 
 ## Architecture
 
@@ -34,6 +35,7 @@ flowchart LR
     runtime --> model[(OpenAI-compatible model<br/>vLLM, Runpod, Qwen API)]
     runtime --> tavily[(Tavily web search)]
     runtime -. "RAG, optional" .-> embed[(Embedding model<br/>any /embeddings API)]
+    runtime -. "RAG store, optional" .-> pg
     library --> pg[(Postgres<br/>Supabase / local)]
     library --> s3[(S3 / RustFS)]
     lib --> pg
@@ -52,7 +54,7 @@ and encodes Opus inside Songbird (see [Playback pipeline](#2-playback-pipeline))
 | Model inference | vLLM serving: local GPU (Docker Compose) and a Runpod Serverless template; endpoint smoke test | [`model-inference/`](model-inference/) |
 | Infrastructure | Terraform for AWS (ECS on one Graviton EC2 instance or Fargate, ECR, IAM, SSM wiring, S3, budget) and the CI/CD notes | [`infra/aws/`](infra/aws/) |
 | Integration tests | The runtime image against a mock OpenAI-compatible model | [`integration/`](integration/) |
-| Design records | Inference provider ADR, the cloud inference design, the knowledge base (RAG) design | [`docs/`](docs/) |
+| Documentation | Architecture (API, database, RAG), security, development, troubleshooting, ADRs | [`docs/`](docs/README.md) |
 
 ## How it works
 
@@ -212,7 +214,12 @@ and each one fails if its lock is removed.
   message as data. The embedding model is configuration: any OpenAI-compatible
   `/embeddings` server, or an offline hashing embedder for development; changing it
   re-indexes automatically. *Why per turn, not as a tool:* one embedding call instead of an
-  extra model round trip. See [docs/architecture/rag.md](docs/architecture/rag.md).
+  extra model round trip. Optionally (`RAG_STORE=postgres`) the chunks live in pgvector,
+  retrieval fuses vector and trigram keyword search (which also works for Thai), and
+  documents can be uploaded per Discord server through presigned S3 URLs and ingested by an
+  SQS-driven worker; built and tested locally, not deployed. See
+  [docs/architecture/rag.md](docs/architecture/rag.md) and
+  [ADR 0002](docs/adr/0002-persistent-rag-store.md).
 * **Language:** each message is classified as Thai or English by script, and the system
   message tells the model which language to reply in
   (`agent_runtime/src/agent_runtime/domain/language.py`).
@@ -252,7 +259,9 @@ caveats; Supabase's free Postgres is managed and survives deploys. *Why not EFS 
 S3 is cheaper, needs no mount, and presigned URLs let Songbird stream objects directly.
 
 Design records: [ADR 0001](docs/adr/0001-inference-provider.md) and
-[cloud inference design](docs/architecture/cloud-inference.md).
+[cloud inference design](docs/architecture/cloud-inference.md). The knowledge base's
+upload bucket, queue and worker are designed but not in the Terraform yet
+([rag.md §7.6](docs/architecture/rag.md#76-deployment-requirements-not-built-yet)).
 
 ## Measured numbers
 
@@ -282,11 +291,14 @@ environment, `.env` locally and SSM in ECS) and can be built, run and stopped on
 
 Each directory's README has the configuration and details: [discord_bot](discord_bot/README.md),
 [agent_runtime](agent_runtime/README.md), [model-inference](model-inference/README.md),
-[infra/aws](infra/aws/README.md).
+[infra/aws](infra/aws/README.md), [integration](integration/README.md). Prerequisites, local
+services and the full test matrix: [docs/development.md](docs/development.md); when
+something breaks: [docs/operations/troubleshooting.md](docs/operations/troubleshooting.md).
 
 ## Status and plans
 
 Built: chat with the agent runtime, radio, direct links, the server library, fuzzy search,
-music control from chat (stations, library songs by title, skip, stop, queue), CI, and the
-AWS Terraform (not applied). By design, chat can't play links, leave, upload or delete; and
+music control from chat (stations, library songs by title, skip, stop, queue), the knowledge
+base (in memory, or Postgres with uploads and hybrid search; no Discord command for uploads
+yet), CI, and the AWS Terraform (not applied, no RAG upload resources). By design, chat can't play links, leave, upload or delete; and
 the audio latency measurements above are still to do.

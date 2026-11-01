@@ -28,8 +28,15 @@ application/agent.py              SearchAgent      │             │          
         │            │                 │           │             │              │
         ▼            ▼                 ▼           ▼             ▼              ▼
  memory_store.py    vllm.py        tavily.py  file_documents  openai_embeddings memory_vectors
-                                                              hash_embeddings
+                                                              hash_embeddings   postgres_rag
                                                               (+ embedding_cache)
+
+Uploads (RAG_STORE=postgres + RAG_S3_BUCKET):
+
+http_api.py ──▶ application/ingestion.py Uploads ──▶ DocumentRepository  ObjectStorage  IngestQueue
+                                                     postgres_rag.py     s3_storage.py  sqs_queue.py
+sqs_worker.py ─▶ application/ingestion.py Ingestor ─▶ DocumentRepository, ObjectStorage, EmbeddingPort
+(worker.py: python -m agent_runtime.worker)
 ```
 
 * `domain/inference.py` defines the generic contract: `InferenceRequest` (messages + params),
@@ -40,11 +47,16 @@ application/agent.py              SearchAgent      │             │          
 * `domain/language.py` and `domain/guardrails.py` are pure policies `ChatService` applies
   around the model call (see below).
 * `main.py` (`create_app`) is the composition root; `build_embedder` picks the embedding
-  adapter from `EMBEDDING_PROVIDER`.
+  adapter from `EMBEDDING_PROVIDER`. `worker.py` is the upload worker's.
+* Per-package notes: [domain](src/agent_runtime/domain/README.md),
+  [application](src/agent_runtime/application/README.md) (use cases, ports, behavioural
+  contracts), [adapters](src/agent_runtime/adapters/README.md) (adding an implementation),
+  [db](src/agent_runtime/db/README.md) (migrations), [tests](tests/README.md). The full HTTP
+  contract is in [docs/architecture/api.md](../docs/architecture/api.md).
 
 ## Knowledge base (RAG)
 
-On only with `RAG_DOCS_DIR`. The design, model choices, tuning and operations are in
+On with `RAG_DOCS_DIR` (in memory) or `RAG_STORE=postgres` (persistent, with uploads). The design, model choices, tuning and operations are in
 [docs/architecture/rag.md](../docs/architecture/rag.md); in short:
 
 * At startup (in the background) and on `POST /v1/knowledge/reload`, every `.md`/`.txt`
@@ -62,6 +74,16 @@ On only with `RAG_DOCS_DIR`. The design, model choices, tuning and operations ar
   on without knowledge. Use a multilingual model (e.g. `bge-m3`, `Qwen3-Embedding`,
   `text-embedding-v4`) so Thai questions find English documents and the other way round.
 * The image ships starter documents at `/app/knowledge` (`knowledge/`): how to use the bot.
+* **Persistent store** (`RAG_STORE=postgres`, `DATABASE_URL`): chunks live in pgvector, and
+  retrieval is hybrid: cosine search over the HNSW index fused with trigram keyword search
+  (Reciprocal Rank Fusion), so exact names and commands are found even when the embedding
+  misses them, in Thai too. Requires 1024-dimensional embeddings (bge-m3); any other size
+  is refused at startup.
+* **Uploads** (`RAG_S3_BUCKET`, `RAG_SQS_QUEUE_URL`): the caller gets a presigned POST, the
+  file goes to a private S3 bucket, and S3's event on the SQS queue triggers the ingestion
+  worker (`python -m agent_runtime.worker`), which validates, chunks, embeds and swaps the
+  document's chunks in one transaction. Each chat turn only reads the `global` namespace
+  and its own Discord server's (`discord:<guild id>`, from the conversation id).
 
 ## Web search agent (ReAct) details
 
@@ -140,6 +162,11 @@ classifier model behind its own port would be the next step.
 | `POST` | `/v1/chat` | Bearer | `{message, conversation_id, client_tools?}` → `{message, conversation_id, actions}` |
 | `GET` | `/v1/knowledge` | Bearer | Knowledge base status: `{documents, chunks, embedder, indexed_at, duration_ms}` (404 when disabled) |
 | `POST` | `/v1/knowledge/reload` | Bearer | Re-read and re-index the documents; same body, or 503 if the embedding backend fails |
+| `POST` | `/v1/knowledge/uploads` | Bearer | `{namespace, filename, size_bytes, source?}` → 201 `{document, upload: {method, url, fields}, expires_at, max_bytes}` |
+| `GET` | `/v1/knowledge/documents?namespace=` | Bearer | The namespace's documents and their status |
+| `GET` | `/v1/knowledge/documents/{id}?namespace=` | Bearer | One document (404 in another namespace) |
+| `POST` | `/v1/knowledge/documents/{id}/reprocess?namespace=[&force=true]` | Bearer | 202; re-ingest after a pipeline change, or retry a failure with `force` |
+| `DELETE` | `/v1/knowledge/documents/{id}?namespace=` | Bearer | 204; chunks leave retrieval at once, then the file is deleted |
 | `GET` | `/health` | – | Liveness: the process is up |
 | `GET` | `/ready` | – | Readiness: the backend is reachable and serves `MODEL_NAME` (otherwise 503) |
 
@@ -154,6 +181,8 @@ are never returned to the caller.
 | Backend unreachable, 5xx, or 429 | 503 |
 | Backend timed out | 504 |
 | Embedding backend failed during a knowledge reload | 503 |
+| Uploads not configured, or document not in that namespace | 404 |
+| S3 or SQS unavailable during an upload request | 503 |
 | Unexpected error | 500 |
 
 ## Configuration
@@ -178,6 +207,13 @@ are never returned to the caller.
 | `RAG_TOP_K`, `RAG_MIN_SCORE`, `RAG_MAX_CONTEXT_CHARS` | no | `4`, `0.3`, `4000` | Chunks per turn, minimum cosine similarity (model-specific), excerpt budget |
 | `RAG_CHUNK_CHARS`, `RAG_CHUNK_OVERLAP` | no | `1200`, `200` | Chunk size; overlap when a long paragraph is cut |
 | `RAG_TIMEOUT_SECONDS` | no | `10` | Query embedding + search per turn |
+| `RAG_STORE` | no | `memory` | `memory` or `postgres` (persistent, hybrid search, uploads) |
+| `DATABASE_URL`, `DATABASE_POOL_SIZE` | with `postgres` | –, `5` | Postgres with the `rag` schema (`make migrate`) |
+| `RAG_KEYWORD_MIN_SCORE` | no | `0.25` | Trigram word similarity a keyword hit needs; `1` disables keyword search |
+| `RAG_S3_BUCKET`, `RAG_S3_PREFIX` | no | –, `rag/` | Enables uploads: private bucket and key prefix (credentials from the AWS chain) |
+| `RAG_SQS_QUEUE_URL` | with a bucket | – | Queue receiving the bucket's `ObjectCreated` events and reprocess requests |
+| `RAG_UPLOAD_MAX_BYTES`, `RAG_UPLOAD_URL_TTL_SECONDS` | no | `1000000`, `300` | Upload size limit (enforced by S3 and the worker), presigned URL lifetime |
+| `RAG_INGEST_MAX_ATTEMPTS`, `RAG_INGEST_LEASE_SECONDS` | no | `5`, `300` | Attempts per ingestion; when a crashed worker's job is taken over |
 | `EMBEDDING_PROVIDER` | no | `openai` | `openai` (any OpenAI-compatible `/embeddings`) or `hash` (offline, lexical) |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY` | no | `MODEL_BASE_URL`, `MODEL_API_KEY` | Embedding API root and key; `MODEL_API_KEY` is used only when the base URL is defaulted too |
 | `EMBEDDING_MODEL` | with `openai` | – | Embedding model id, e.g. `bge-m3`, `text-embedding-v4` |
@@ -193,29 +229,20 @@ everything is lost on restart. Turns within one conversation are serialized per 
 
 ## RAG database
 
-A Postgres + pgvector schema `rag` for a persistent vector store. Nothing reads or writes
-it yet: the knowledge base above still uses `InMemoryVectorStore`. Migrations are plain SQL in `src/agent_runtime/db/migrations/`, named
-`<version>_<description>.sql` like the bot's sqlx ones, and shipped in the image.
-
-| Table | Holds |
-|---|---|
-| `rag.documents` | One row per `(namespace, source)`: title, `content_hash` (SHA-256 hex), `metadata` JSON |
-| `rag.chunks` | `ordinal`, `content`, `embedding vector(1024)` (bge-m3), `embedding_model`; deleted with their document |
-
-`chunks.embedding` has an HNSW index for cosine distance (`ORDER BY embedding <=> $1`).
-Changing the embedding model's dimension means a new migration and re-embedding.
+The `rag` schema (Postgres + pgvector), used with `RAG_STORE=postgres`:
+`rag.documents`, `rag.chunks` (`vector(1024)`, HNSW and trigram indexes) and
+`rag.ingestion_jobs`. Migrations are plain SQL shipped in the image and applied by an
+operator, never on startup:
 
 ```sh
 make db-up     # local Postgres + pgvector from ../compose.yaml
 make migrate   # apply pending migrations to DATABASE_URL (.env)
-make test-db   # all tests, incl. migrations against local Postgres
+make test-db   # all tests, incl. migrations, store and ingestion against local Postgres
+make worker    # the ingestion worker with .env (needs RAG_S3_BUCKET, RAG_SQS_QUEUE_URL)
 ```
 
-`python -m agent_runtime.db.migrate` (in the image too) applies each pending file in its own
-transaction and records it with a checksum in `_agent_runtime_migrations`. It fails if an
-applied file was edited or is missing: never edit an applied migration, add a new one. An
-advisory lock serializes concurrent runs, so on Supabase use the direct or session-pooler
-URL, not the transaction pooler. The app does not migrate on startup.
+How the runner works and how to add a migration: [src/agent_runtime/db/README.md](src/agent_runtime/db/README.md).
+Schema and data lifecycle: [docs/architecture/database.md](../docs/architecture/database.md).
 
 ## Development
 
