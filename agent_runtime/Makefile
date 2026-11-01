@@ -9,7 +9,7 @@ IMAGE    ?= tatarbot-agent-runtime:local
 DEV_DB   ?= postgres://tatarbot:tatarbot-local@127.0.0.1:$${POSTGRES_PORT:-55432}/tatarbot
 
 .DEFAULT_GOAL := help
-.PHONY: help install env run dev test lint fmt check smoke db-up migrate test-db image image-run
+.PHONY: help install env run dev test lint fmt check smoke db-up migrate test-db worker image image-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -50,7 +50,10 @@ db-up: ## Start local Postgres + pgvector (compose)
 migrate: ## Apply the RAG migrations to DATABASE_URL (from .env)
 	@$(LOAD_ENV); uv run python -m agent_runtime.db.migrate
 
-test-db: db-up ## Tests incl. migrations against local Postgres (fresh database per test)
+worker: ## Run the upload ingestion worker with .env (SQS -> parse, embed -> Postgres)
+	@$(LOAD_ENV); uv run python -m agent_runtime.worker
+
+test-db: db-up ## Tests incl. migrations, store, ingestion against local Postgres (fresh database per test)
 	TEST_DATABASE_URL=$(DEV_DB) uv run pytest -q
 
 smoke: ## Call a running runtime: /health, /ready, /v1/chat

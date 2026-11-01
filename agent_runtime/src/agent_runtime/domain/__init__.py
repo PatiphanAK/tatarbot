@@ -12,7 +12,9 @@ from agent_runtime.domain.errors import (
     ModelResponseError,
     ModelTimeoutError,
     ModelUnavailableError,
+    ObjectMissingError,
     SearchError,
+    StorageError,
 )
 from agent_runtime.domain.inference import (
     ChatMessage,
@@ -24,6 +26,12 @@ from agent_runtime.domain.inference import (
     ToolCall,
     ToolSpec,
 )
+from agent_runtime.domain.ingestion import (
+    DocumentStatus,
+    InvalidDocumentError,
+    ParsedDocument,
+    StoredDocument,
+)
 from agent_runtime.domain.knowledge import Chunk, Document, RetrievedChunk
 from agent_runtime.domain.language import Language, detect_language
 from agent_runtime.domain.search import SearchResult
@@ -32,10 +40,12 @@ __all__ = [
     "ChatMessage",
     "Chunk",
     "Document",
+    "DocumentStatus",
     "EmbeddingError",
     "GenerationParams",
     "InferenceRequest",
     "InferenceResult",
+    "InvalidDocumentError",
     "InvalidInputError",
     "Language",
     "ModelError",
@@ -43,10 +53,14 @@ __all__ = [
     "ModelResponseError",
     "ModelTimeoutError",
     "ModelUnavailableError",
+    "ObjectMissingError",
+    "ParsedDocument",
     "RetrievedChunk",
     "Role",
     "SearchError",
     "SearchResult",
+    "StorageError",
+    "StoredDocument",
     "TokenUsage",
     "ToolCall",
     "ToolSpec",

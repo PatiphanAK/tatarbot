@@ -36,6 +36,7 @@ from agent_runtime.domain.client_tools import (
     apply_results,
     describe_state,
 )
+from agent_runtime.domain.ingestion import retrieval_namespaces
 from agent_runtime.domain.language import contains_thai, language_directive
 
 log = logging.getLogger(__name__)
@@ -137,7 +138,11 @@ class ChatService:
             history = await self._store.load(conversation_id)
             recent = self._recent(history)
             language = detect_language(message) or _conversation_language(recent)
-            knowledge = await self._knowledge.retrieve(message) if self._knowledge else []
+            knowledge = (
+                await self._knowledge.retrieve(message, retrieval_namespaces(conversation_id))
+                if self._knowledge
+                else []
+            )
             user = ChatMessage(Role.USER, message)
             system = self._system_message(language, client_tools, knowledge)
             messages = (

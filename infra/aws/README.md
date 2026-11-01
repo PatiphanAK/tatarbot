@@ -16,7 +16,9 @@ chosen with `launch_type`:
 Costs, assumptions and the other options are in [Cost](#cost-ap-southeast-1). Why the
 services are shaped this way (Supabase + S3 instead of SQLite/EFS, one bot task) is in the
 [top-level README](../../README.md#8-deployment). The music library's resources (`music.tf`)
-are off unless `music_library_enabled = true`.
+are off unless `music_library_enabled = true`. The knowledge base's upload bucket, SQS
+queue, worker service and their IAM are **not** defined here yet; the requirements are in
+[rag.md §7.6](../../docs/architecture/rag.md#76-deployment-requirements-not-built-yet).
 
 ## What it creates (EC2)
 

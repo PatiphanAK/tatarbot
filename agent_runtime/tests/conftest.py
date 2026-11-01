@@ -1,4 +1,9 @@
+import os
+import uuid
+
+import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 
 from agent_runtime.application import ModelPort
 from agent_runtime.config import Settings
@@ -50,3 +55,21 @@ def settings() -> Settings:
         system_prompt=SYSTEM_PROMPT,
         max_history_messages=20,
     )
+
+
+# Tests marked `db` need Postgres with pgvector at TEST_DATABASE_URL (`make test-db`); each
+# gets a fresh database, dropped afterwards. Skipped without it.
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
+db = pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL not set")
+
+
+@pytest.fixture
+def database():
+    """Conninfo of a fresh, empty database."""
+    name = f"test_rag_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as admin:
+        admin.execute(f'CREATE DATABASE "{name}"')
+        try:
+            yield make_conninfo(TEST_DATABASE_URL, dbname=name)
+        finally:
+            admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')

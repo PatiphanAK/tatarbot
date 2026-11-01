@@ -3,7 +3,8 @@
 Vectors are normalised once when stored, so a search is one dot product per chunk, in a
 worker thread so the event loop keeps serving. Pure Python: about 25 ms for 500 chunks and
 100 ms for 2,000 at 1,024 dimensions. Fine for a hand-written knowledge base; beyond that,
-numpy, an ANN index or pgvector behind the same port.
+`PostgresVectorStore` (pgvector). Semantic only: no keyword matching, no namespaces (every
+document here comes from RAG_DOCS_DIR, which is global).
 """
 
 import asyncio
@@ -32,7 +33,14 @@ class InMemoryVectorStore(VectorStore):
         self._chunks, self._vectors = tuple(chunks), normalized
         self._dimensions = dimensions.pop() if dimensions else 0
 
-    async def search(self, vector: list[float], top_k: int) -> list[RetrievedChunk]:
+    async def search(
+        self,
+        vector: list[float],
+        top_k: int,
+        *,
+        text: str = "",
+        namespaces: Sequence[str] = (),
+    ) -> list[RetrievedChunk]:
         chunks, vectors = self._chunks, self._vectors
         if not chunks or top_k <= 0:
             return []

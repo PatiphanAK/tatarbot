@@ -3,6 +3,10 @@
     index:    DocumentSource -> chunk_document -> EmbeddingPort.embed_documents -> VectorStore
     retrieve: message -> EmbeddingPort.embed_query -> VectorStore.search -> score filter
 
+With the Postgres store, uploaded documents are indexed by the ingestion worker
+(`application/ingestion.py`) into the same store; this class only indexes RAG_DOCS_DIR (if
+set) and retrieves, within the namespaces the turn may read.
+
 The pipeline knows no model, URL or file format; the embedding model is whatever
 `EmbeddingPort` the composition root wires in. `ChatService` calls `retrieve` once per turn
 and puts the result in the system message, marked as data, not instructions.
@@ -21,7 +25,7 @@ from datetime import UTC, datetime
 
 from agent_runtime.application.ports import DocumentSource, EmbeddingPort, VectorStore
 from agent_runtime.domain import EmbeddingError, RetrievedChunk
-from agent_runtime.domain.knowledge import chunk_document
+from agent_runtime.domain.knowledge import CHUNKER_VERSION, chunk_document
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +51,11 @@ class KnowledgeSettings:
     # Query embedding + search, per turn.
     timeout_seconds: float = 10.0
 
+    @property
+    def chunker_version(self) -> str:
+        """Changes whenever chunking would produce different chunks."""
+        return f"{CHUNKER_VERSION}:{self.chunk_chars}:{self.chunk_overlap}"
+
 
 @dataclass(frozen=True)
 class IndexStatus:
@@ -60,7 +69,7 @@ class IndexStatus:
 class KnowledgeBase:
     def __init__(
         self,
-        source: DocumentSource,
+        source: DocumentSource | None,
         embedder: EmbeddingPort,
         store: VectorStore,
         settings: KnowledgeSettings | None = None,
@@ -76,11 +85,15 @@ class KnowledgeBase:
     def status(self) -> IndexStatus:
         return self._status
 
+    @property
+    def settings(self) -> KnowledgeSettings:
+        return self._settings
+
     async def refresh(self) -> IndexStatus:
         """(Re)build the index from the source. Concurrent calls run one after the other."""
         async with self._refresh_lock:
             started = time.perf_counter()
-            documents = await self._source.load()
+            documents = await self._source.load() if self._source else []
             chunks = [
                 c
                 for d in documents
@@ -89,10 +102,12 @@ class KnowledgeBase:
             vectors = await self._embedder.embed_documents([c.embedding_text for c in chunks])
             if len(vectors) != len(chunks):
                 raise EmbeddingError("embedder returned the wrong number of vectors")
-            await self._store.replace(chunks, vectors)
+            if self._source:
+                await self._store.replace(chunks, vectors)
             self._status = IndexStatus(
                 documents=len(documents),
-                chunks=len(chunks),
+                # A shared store also holds uploaded documents' chunks.
+                chunks=await self._store.count() if self._store.shared else len(chunks),
                 embedder=self._embedder.identity,
                 indexed_at=datetime.now(UTC),
                 duration_ms=round((time.perf_counter() - started) * 1000),
@@ -106,33 +121,40 @@ class KnowledgeBase:
             )
             return self._status
 
-    async def retrieve(self, query: str) -> list[RetrievedChunk]:
-        """The chunks worth showing the model for `query`; [] on any failure."""
-        if self._status.chunks == 0 or not query.strip():
+    async def retrieve(self, query: str, namespaces: Sequence[str] = ()) -> list[RetrievedChunk]:
+        """The chunks worth showing the model for `query`, from `namespaces` only (stores
+        without namespaces ignore it); [] on any failure."""
+        if not query.strip() or (self._status.chunks == 0 and not self._store.shared):
             return []
         s = self._settings
         try:
             async with asyncio.timeout(s.timeout_seconds):
                 vector = await self._embedder.embed_query(query)
-                hits = await self._store.search(vector, s.top_k)
+                hits = await self._store.search(vector, s.top_k, text=query, namespaces=namespaces)
         except TimeoutError:
             log.warning("knowledge retrieval timed out")
             return []
         except EmbeddingError as e:
             log.warning("knowledge retrieval failed: %s", e)
             return []
+        except Exception:
+            # A database outage must not fail the turn either.
+            log.exception("knowledge retrieval failed")
+            return []
 
         kept, used = [], 0
         for hit in hits:
-            if hit.score < s.min_score or used + len(hit.chunk.text) > s.max_context_chars:
+            relevant = hit.score >= s.min_score or hit.keyword_score is not None
+            if not relevant or used + len(hit.chunk.text) > s.max_context_chars:
                 continue
             kept.append(hit)
             used += len(hit.chunk.text)
         log.info(
-            "knowledge retrieved hits=%d kept=%d top_score=%.3f",
+            "knowledge retrieved hits=%d kept=%d keyword_hits=%d top_score=%.3f",
             len(hits),
             len(kept),
-            hits[0].score if hits else 0.0,
+            sum(h.keyword_score is not None for h in hits),
+            max((h.score for h in hits), default=0.0),
         )
         return kept
 
