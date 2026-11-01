@@ -11,6 +11,10 @@ import hashlib
 import re
 from dataclasses import dataclass
 
+# Bump when `chunk_document` changes its output: stored chunks are then re-ingested on
+# their next reprocess (it is part of the ingestion job's identity).
+CHUNKER_VERSION = "md-v1"
+
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _BLANK_LINES = re.compile(r"\n\s*\n")
 
@@ -50,6 +54,9 @@ class RetrievedChunk:
     chunk: Chunk
     # Cosine similarity to the query, in [-1, 1]; higher is closer.
     score: float
+    # Trigram word similarity to the query, in [0, 1], when keyword search matched it
+    # (hybrid stores only); such a chunk is kept even below the cosine threshold.
+    keyword_score: float | None = None
 
 
 def document_title(text: str, fallback: str) -> str:

@@ -16,6 +16,13 @@ from agent_runtime.adapters.outbound.hash_embeddings import HashEmbeddings
 from agent_runtime.adapters.outbound.memory_store import InMemoryConversationStore
 from agent_runtime.adapters.outbound.memory_vectors import InMemoryVectorStore
 from agent_runtime.adapters.outbound.openai_embeddings import OpenAIEmbeddings
+from agent_runtime.adapters.outbound.postgres_rag import (
+    PostgresDocumentRepository,
+    PostgresVectorStore,
+    create_pool,
+)
+from agent_runtime.adapters.outbound.s3_storage import S3Storage
+from agent_runtime.adapters.outbound.sqs_queue import SqsQueue
 from agent_runtime.adapters.outbound.tavily import TavilySearch
 from agent_runtime.adapters.outbound.vllm import VLLMModel
 from agent_runtime.application import (
@@ -27,8 +34,11 @@ from agent_runtime.application import (
     KnowledgeSettings,
     ModelPort,
     SearchPort,
+    Uploads,
+    UploadSettings,
+    VectorStore,
 )
-from agent_runtime.config import ConfigError, Settings
+from agent_runtime.config import RAG_SCHEMA_DIMENSIONS, ConfigError, Settings
 from agent_runtime.domain import EmbeddingError, GenerationParams
 
 log = logging.getLogger("agent_runtime")
@@ -60,22 +70,35 @@ def create_app(
         max_conversations=settings.max_conversations,
     )
     knowledge = None
-    if settings.rag_docs_dir:
+    uploads = None
+    pool = None
+    vectors: VectorStore | None = None
+    if settings.knowledge_enabled:
         embedder = embedder or build_embedder(settings)
         if settings.rag_cache_file:
             embedder = CachedEmbeddings(embedder, settings.rag_cache_file)
+        if settings.rag_store == "postgres":
+            pool = create_pool(settings.database_url, settings.database_pool_size)
+            vectors = PostgresVectorStore(
+                pool,
+                embedder.identity,
+                RAG_SCHEMA_DIMENSIONS,
+                keyword_min_score=settings.rag_keyword_min_score,
+            )
+            if settings.uploads_enabled:
+                uploads = Uploads(
+                    PostgresDocumentRepository(pool, RAG_SCHEMA_DIMENSIONS),
+                    S3Storage(settings.rag_s3_bucket),
+                    SqsQueue(settings.rag_sqs_queue_url),
+                    upload_settings(settings),
+                )
+        else:
+            vectors = InMemoryVectorStore()
         knowledge = KnowledgeBase(
-            DirectoryDocumentSource(settings.rag_docs_dir),
+            DirectoryDocumentSource(settings.rag_docs_dir) if settings.rag_docs_dir else None,
             embedder,
-            InMemoryVectorStore(),
-            KnowledgeSettings(
-                chunk_chars=settings.rag_chunk_chars,
-                chunk_overlap=settings.rag_chunk_overlap,
-                top_k=settings.rag_top_k,
-                min_score=settings.rag_min_score,
-                max_context_chars=settings.rag_max_context_chars,
-                timeout_seconds=settings.rag_timeout_seconds,
-            ),
+            vectors,
+            knowledge_settings(settings),
         )
     chat_service = ChatService(
         model,
@@ -99,12 +122,19 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         log.info(
-            "agent runtime started (model=%s, guardrails=%s, search=%s, knowledge=%s)",
+            "agent runtime started (model=%s, guardrails=%s, search=%s, knowledge=%s, "
+            "store=%s, uploads=%s)",
             settings.model_name,
             settings.guardrails_enabled,
             "tavily" if search else "off",
             knowledge.status.embedder if knowledge else "off",
+            settings.rag_store if knowledge else "off",
+            "on" if uploads else "off",
         )
+        if pool:
+            # Does not wait for a connection: a database outage leaves the runtime serving
+            # without knowledge, like an embedding outage.
+            await pool.open(wait=False)
         # Indexing runs in the background: the API serves at once (without knowledge
         # until the index is built), and a cold embedding backend cannot block startup.
         indexing = asyncio.create_task(_initial_index(knowledge)) if knowledge else None
@@ -116,11 +146,36 @@ def create_app(
             await search.aclose()
         if embedder:
             await embedder.aclose()
+        if pool:
+            await pool.close()
 
     app = FastAPI(title="TatarBot Agent Runtime", version="0.1.0", lifespan=lifespan)
     install_error_handlers(app)
-    app.include_router(build_router(chat_service, model, settings.agent_api_key, knowledge))
+    app.include_router(
+        build_router(chat_service, model, settings.agent_api_key, knowledge, uploads)
+    )
     return app
+
+
+def knowledge_settings(settings: Settings) -> KnowledgeSettings:
+    return KnowledgeSettings(
+        chunk_chars=settings.rag_chunk_chars,
+        chunk_overlap=settings.rag_chunk_overlap,
+        top_k=settings.rag_top_k,
+        min_score=settings.rag_min_score,
+        max_context_chars=settings.rag_max_context_chars,
+        timeout_seconds=settings.rag_timeout_seconds,
+    )
+
+
+def upload_settings(settings: Settings) -> UploadSettings:
+    return UploadSettings(
+        max_bytes=settings.rag_upload_max_bytes,
+        url_ttl_seconds=settings.rag_upload_url_ttl_seconds,
+        key_prefix=settings.rag_s3_prefix,
+        max_attempts=settings.rag_ingest_max_attempts,
+        lease_seconds=settings.rag_ingest_lease_seconds,
+    )
 
 
 def build_embedder(settings: Settings) -> EmbeddingPort:

@@ -15,6 +15,11 @@ class ConfigError(Exception):
 
 # EMBEDDING_PROVIDER values; main.py maps each to an `EmbeddingPort` adapter.
 EMBEDDING_PROVIDERS = ("openai", "hash")
+# RAG_STORE values: in-process memory, or Postgres + pgvector (persistent, uploads).
+RAG_STORES = ("memory", "postgres")
+# rag.chunks.embedding is vector(1024) (BGE-M3). Another size needs a new migration and a
+# re-embed, never a silent change; the Postgres store also checks the live schema.
+RAG_SCHEMA_DIMENSIONS = 1024
 
 
 @dataclass(frozen=True)
@@ -39,7 +44,9 @@ class Settings:
     turn_timeout_seconds: float = 110.0
     max_history_messages: int = 20
     max_conversations: int = 10_000
-    # Knowledge base (RAG) is enabled when a documents directory is set.
+    # Knowledge base (RAG) is enabled when a documents directory is set or RAG_STORE is
+    # postgres.
+    rag_store: str = "memory"
     rag_docs_dir: str | None = None
     rag_cache_file: str | None = None
     rag_chunk_chars: int = 1200
@@ -48,6 +55,22 @@ class Settings:
     rag_min_score: float = 0.3
     rag_max_context_chars: int = 4000
     rag_timeout_seconds: float = 10.0
+    # Postgres store: trigram similarity a keyword hit needs (it is then kept even below
+    # RAG_MIN_SCORE); 1 turns keyword search off.
+    rag_keyword_min_score: float = 0.25
+    database_url: str | None = field(default=None, repr=False)
+    database_pool_size: int = 5
+    # Uploads (Postgres store only): enabled when a bucket is set. S3 credentials and
+    # region come from the standard AWS chain (task role); AWS_ENDPOINT_URL_S3 / _SQS
+    # point at local stand-ins.
+    rag_s3_bucket: str | None = None
+    rag_s3_prefix: str = "rag/"
+    rag_sqs_queue_url: str | None = None
+    rag_upload_max_bytes: int = 1_000_000
+    rag_upload_url_ttl_seconds: int = 300
+    rag_ingest_max_attempts: int = 5
+    # A worker holds a job this long; a crashed worker's job is taken over after it.
+    rag_ingest_lease_seconds: int = 300
     # Embedding model: "openai" (any OpenAI-compatible /embeddings API) or "hash" (offline).
     embedding_provider: str = "openai"
     embedding_base_url: str | None = None
@@ -59,8 +82,20 @@ class Settings:
     embedding_batch_size: int = 32
     embedding_timeout_seconds: float = 30.0
 
+    @property
+    def knowledge_enabled(self) -> bool:
+        return bool(self.rag_docs_dir) or self.rag_store == "postgres"
+
+    @property
+    def uploads_enabled(self) -> bool:
+        return self.rag_store == "postgres" and bool(self.rag_s3_bucket)
+
     def __post_init__(self):
-        if not self.rag_docs_dir:
+        if self.rag_store not in RAG_STORES:
+            raise ConfigError(f"RAG_STORE must be one of {', '.join(RAG_STORES)}")
+        if self.rag_s3_bucket and self.rag_store != "postgres":
+            raise ConfigError("RAG_S3_BUCKET needs RAG_STORE=postgres")
+        if not self.knowledge_enabled:
             return
         if self.embedding_provider not in EMBEDDING_PROVIDERS:
             raise ConfigError(
@@ -68,11 +103,44 @@ class Settings:
                 f"got {self.embedding_provider!r}"
             )
         if self.embedding_provider == "openai" and not self.embedding_model:
-            raise ConfigError("EMBEDDING_MODEL is required when RAG_DOCS_DIR is set")
+            raise ConfigError("EMBEDDING_MODEL is required when the knowledge base is enabled")
         if not 0 <= self.rag_chunk_overlap < self.rag_chunk_chars // 2:
             raise ConfigError("RAG_CHUNK_OVERLAP must be below half of RAG_CHUNK_CHARS")
         if self.rag_chunk_chars < 100:
             raise ConfigError("RAG_CHUNK_CHARS must be at least 100")
+        if self.rag_store == "postgres":
+            self._check_postgres()
+
+    def _check_postgres(self) -> None:
+        if not self.database_url:
+            raise ConfigError("DATABASE_URL is required when RAG_STORE=postgres")
+        dimensions = self.embedding_dimensions
+        if self.embedding_provider == "hash":
+            dimensions = dimensions or 512
+        if dimensions is not None and dimensions != RAG_SCHEMA_DIMENSIONS:
+            raise ConfigError(
+                f"the RAG schema stores {RAG_SCHEMA_DIMENSIONS}-dimensional vectors; "
+                f"EMBEDDING_DIMENSIONS is {dimensions} (set it to {RAG_SCHEMA_DIMENSIONS}, or "
+                "use a model whose native size it is, e.g. bge-m3)"
+            )
+        if not 0 < self.rag_keyword_min_score <= 1:
+            raise ConfigError("RAG_KEYWORD_MIN_SCORE must be in (0, 1]")
+        if self.database_pool_size < 1:
+            raise ConfigError("DATABASE_POOL_SIZE must be at least 1")
+        if not self.rag_s3_bucket:
+            return
+        if not self.rag_sqs_queue_url:
+            raise ConfigError("RAG_SQS_QUEUE_URL is required when RAG_S3_BUCKET is set")
+        if not 1 <= self.rag_upload_max_bytes <= 50_000_000:
+            raise ConfigError("RAG_UPLOAD_MAX_BYTES must be in [1, 50000000]")
+        if not 60 <= self.rag_upload_url_ttl_seconds <= 3600:
+            raise ConfigError("RAG_UPLOAD_URL_TTL_SECONDS must be in [60, 3600]")
+        if self.rag_ingest_max_attempts < 1 or self.rag_ingest_lease_seconds < 30:
+            raise ConfigError(
+                "RAG_INGEST_MAX_ATTEMPTS must be at least 1, RAG_INGEST_LEASE_SECONDS 30"
+            )
+        if self.rag_s3_prefix and not self.rag_s3_prefix.endswith("/"):
+            raise ConfigError("RAG_S3_PREFIX must end with '/'")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -94,6 +162,7 @@ class Settings:
             turn_timeout_seconds=_parse("TURN_TIMEOUT_SECONDS", float, 110.0),
             max_history_messages=_parse("MAX_HISTORY_MESSAGES", int, 20),
             max_conversations=_parse("MAX_CONVERSATIONS", int, 10_000),
+            rag_store=(_optional("RAG_STORE") or "memory").lower(),
             rag_docs_dir=_optional("RAG_DOCS_DIR"),
             rag_cache_file=_optional("RAG_CACHE_FILE"),
             rag_chunk_chars=_parse("RAG_CHUNK_CHARS", int, 1200),
@@ -102,6 +171,16 @@ class Settings:
             rag_min_score=_parse("RAG_MIN_SCORE", float, 0.3),
             rag_max_context_chars=_parse("RAG_MAX_CONTEXT_CHARS", int, 4000),
             rag_timeout_seconds=_parse("RAG_TIMEOUT_SECONDS", float, 10.0),
+            rag_keyword_min_score=_parse("RAG_KEYWORD_MIN_SCORE", float, 0.25),
+            database_url=_optional("DATABASE_URL"),
+            database_pool_size=_parse("DATABASE_POOL_SIZE", int, 5),
+            rag_s3_bucket=_optional("RAG_S3_BUCKET"),
+            rag_s3_prefix=os.environ.get("RAG_S3_PREFIX", "rag/").strip(),
+            rag_sqs_queue_url=_optional("RAG_SQS_QUEUE_URL"),
+            rag_upload_max_bytes=_parse("RAG_UPLOAD_MAX_BYTES", int, 1_000_000),
+            rag_upload_url_ttl_seconds=_parse("RAG_UPLOAD_URL_TTL_SECONDS", int, 300),
+            rag_ingest_max_attempts=_parse("RAG_INGEST_MAX_ATTEMPTS", int, 5),
+            rag_ingest_lease_seconds=_parse("RAG_INGEST_LEASE_SECONDS", int, 300),
             **_embedding_from_env(),
         )
 

@@ -29,3 +29,11 @@ class SearchError(Exception):
 class EmbeddingError(Exception):
     """The embedding backend failed or answered with unusable vectors. Retrieval is skipped
     for that turn; a reload fails with 503."""
+
+
+class StorageError(Exception):
+    """The object storage failed transiently (network, throttling, 5xx); retry later."""
+
+
+class ObjectMissingError(StorageError):
+    """The object is not (or no longer) in the bucket."""

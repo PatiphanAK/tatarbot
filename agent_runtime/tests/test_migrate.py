@@ -1,18 +1,13 @@
 """Migration runner. Tests marked `db` need Postgres with pgvector at TEST_DATABASE_URL
 (`make test-db`); each gets a fresh database, dropped afterwards. Skipped without it."""
 
-import os
-import uuid
 from dataclasses import replace
 
 import psycopg
 import pytest
-from psycopg.conninfo import make_conninfo
+from conftest import db
 
 from agent_runtime.db.migrate import Migration, MigrationError, load_migrations, migrate
-
-TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
-db = pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL not set")
 
 
 def test_packaged_migrations_are_ordered_and_named():
@@ -21,17 +16,6 @@ def test_packaged_migrations_are_ordered_and_named():
     versions = [m.version for m in migrations]
     assert versions == sorted(set(versions))
     assert migrations[0].description == "rag"
-
-
-@pytest.fixture
-def database():
-    name = f"test_migrate_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as admin:
-        admin.execute(f'CREATE DATABASE "{name}"')
-        try:
-            yield make_conninfo(TEST_DATABASE_URL, dbname=name)
-        finally:
-            admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
 
 
 @db
@@ -107,3 +91,71 @@ def test_failed_migration_is_rolled_back(database):
     with psycopg.connect(database) as conn:
         assert conn.execute("SELECT to_regclass('half')").fetchone()[0] is None
         assert conn.execute("SELECT count(*) FROM _agent_runtime_migrations").fetchone()[0] == 0
+
+
+@db
+def test_ingestion_migration_keeps_existing_rows(database):
+    first, *rest = load_migrations()
+    migrate(database, [first])
+    with psycopg.connect(database) as conn:
+        doc = conn.execute(
+            "INSERT INTO rag.documents (namespace, source, content_hash)"
+            " VALUES ('global', 'old.md', %s) RETURNING id",
+            ("b" * 64,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO rag.chunks (document_id, ordinal, content, embedding, embedding_model)"
+            " VALUES (%s, 0, 'old chunk', %s::vector, 'bge-m3')",
+            (doc, str([1.0] * 1024)),
+        )
+    migrate(database)
+    with psycopg.connect(database) as conn:
+        status, provider = conn.execute(
+            "SELECT status, storage_provider FROM rag.documents WHERE id = %s", (doc,)
+        ).fetchone()
+        assert (status, provider) == ("ready", None)
+        assert conn.execute("SELECT heading FROM rag.chunks").fetchone()[0] == ""
+
+
+@db
+def test_ingestion_schema_constraints(database):
+    migrate(database)
+    with psycopg.connect(database, autocommit=True) as conn:
+        # A pending upload has no hash yet...
+        doc = conn.execute(
+            "INSERT INTO rag.documents (namespace, source, storage_provider, storage_bucket,"
+            " object_key, status) VALUES ('global', 'a.md', 's3', 'bucket', 'rag/a.md',"
+            " 'pending_upload') RETURNING id"
+        ).fetchone()[0]
+        # ...but a ready document must have one.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("UPDATE rag.documents SET status = 'ready' WHERE id = %s", (doc,))
+        # An S3 document needs its location.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO rag.documents (namespace, source, storage_provider, status)"
+                " VALUES ('global', 'b.md', 's3', 'pending_upload')"
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute("UPDATE rag.documents SET status = 'uploaded' WHERE id = %s", (doc,))
+        # One job per object and pipeline configuration.
+        job = (
+            "INSERT INTO rag.ingestion_jobs (document_id, object_key, parser_version,"
+            " chunker_version, embedding_model) VALUES (%s, 'rag/a.md', 'p', 'c', 'm')"
+        )
+        conn.execute(job, (doc,))
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(job, (doc,))
+        conn.execute("DELETE FROM rag.documents WHERE id = %s", (doc,))
+        assert conn.execute("SELECT count(*) FROM rag.ingestion_jobs").fetchone()[0] == 0
+
+
+@db
+def test_trigram_matching_handles_thai(database):
+    """Keyword search relies on the database classifying Thai letters as alphanumeric."""
+    migrate(database)
+    with psycopg.connect(database) as conn:
+        thai = conn.execute(
+            "SELECT word_similarity('อัปโหลดเพลง', 'คุณสามารถอัปโหลดเพลงได้ไม่เกิน 25 MB')"
+        ).fetchone()[0]
+        assert thai > 0.5
