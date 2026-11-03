@@ -25,6 +25,7 @@ module sits next to its code.
 | [0001](adr/0001-inference-provider.md) | Inference on Runpod Serverless vLLM behind an OpenAI-compatible API (Proposed) |
 | [0002](adr/0002-persistent-rag-store.md) | pgvector + trigram hybrid retrieval in the shared Postgres; S3 presigned uploads with SQS-driven ingestion (Accepted, not deployed) |
 | [0003](adr/0003-deploy-on-gcp.md) | GCP in asia-southeast1: the bot on a GCE e2-micro (COS, systemd), the runtime on private Cloud Run with ID-token auth and history in Postgres; replaces AWS ECS (Accepted, not applied) |
+| [0004](adr/0004-library-ingestion-worker.md) | Generic async file ingestion core (schema `ingest`) on a private Cloud Run worker fed by Cloud Tasks, TatarBot's music library as first consumer; lease-fenced exactly-once effects, transactional notification outbox, app-verified caller identity, kill switch; native GCS auth replaces HMAC (Proposed) |
 
 New ADRs: next number, `Status / Date / Details` header, then Context, Decision,
 Alternatives considered, Consequences, Revisit when.
