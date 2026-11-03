@@ -17,6 +17,9 @@ RUN useradd --system --uid 10001 --no-create-home app
 COPY --from=build /app/.venv /app/.venv
 # Starter knowledge base; used only with RAG_DOCS_DIR=/app/knowledge (or mount your own).
 COPY knowledge /app/knowledge
+# Supabase's root CA, for DATABASE_URL=...?sslmode=verify-full&sslrootcert=<this path>
+# (the same file and path as in the bot's image).
+COPY certs/supabase-root-2021.crt /etc/tatarbot/supabase-root-2021.crt
 # uvicorn reads UVICORN_* for its CLI options. Override UVICORN_HOST=127.0.0.1 when the
 # bot shares the network namespace (compose, ECS task) so the API stays off the network.
 ENV PATH=/app/.venv/bin:$PATH \

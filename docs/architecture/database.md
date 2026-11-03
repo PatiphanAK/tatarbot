@@ -9,6 +9,7 @@ other's.
 |---|---|---|---|---|---|
 | `discord_bot` | `public` | `library_tracks` | [`discord_bot/migrations/`](../../discord_bot/migrations/) | the bot, on every (re)connect (sqlx) | `_sqlx_migrations` |
 | `agent_runtime` | `rag` | `documents`, `chunks`, `ingestion_jobs` | [`agent_runtime/src/agent_runtime/db/migrations/`](../../agent_runtime/src/agent_runtime/db/migrations/) | an operator: `make -C agent_runtime migrate` (never on startup) | `_agent_runtime_migrations` |
+| `agent_runtime` | `chat` | `conversations` | same runner (`20261103000000_conversations.sql`) | same | same |
 
 Both are append-only: an applied migration file is never edited (each runner checks a
 checksum and refuses), and a schema change is a new file. The SQL files are the source of
@@ -150,19 +151,36 @@ don't interleave.
   compares with the live column type on first use, and every vector is checked on write and
   query.
 
+## Conversation history (`agent_runtime`, schema `chat`)
+
+Used with `CONVERSATION_STORE=postgres` (the GCP deployment, where the runtime scales to
+zero on Cloud Run). `chat.conversations` has one row per `conversation_id` (the bot's
+`discord:<guild|dm>:<channel>:<user>`), with `messages`, a JSONB array of the runtime's
+`ChatMessage`s (role, content, tool calls, tool call id) oldest first, and `updated_at`.
+
+* **Writes:** `append` and `replace_last` lock the row (`SELECT … FOR UPDATE`), change the
+  list in the runtime, and upsert it, trimmed to `2 × MAX_HISTORY_MESSAGES`. Refused and
+  failed turns are never stored.
+* **Retention:** rows idle longer than `CONVERSATION_RETENTION_DAYS` (30) are deleted by
+  the runtime, at most once an hour per process, after a write.
+* **Failure:** every statement has a 5 s timeout. On a database error `load` returns no
+  history and writes are dropped, each logged as a warning; the turn still gets an answer.
+* **Contents:** this is user chat text. It is personal data in Supabase, under the same
+  backups and access as the library.
+
 ## Connections
 
 | Service | Driver | Pooler mode on Supabase | Why |
 |---|---|---|---|
 | bot | sqlx (`DATABASE_MAX_CONNECTIONS`, default 3) | session (port 5432) | sqlx uses prepared statements |
-| runtime | psycopg 3 + psycopg-pool (`DATABASE_POOL_SIZE`, default 5) | session | the migration runner holds an advisory lock for the whole session. The app disables prepared statements and uses only transaction-scoped settings and locks, so the transaction pooler (port 6543) should also work for it, but that is untested |
+| runtime | psycopg 3 + psycopg-pool (`DATABASE_POOL_SIZE`, default 5; 2 on Cloud Run) | session | the migration runner holds an advisory lock for the whole session. The app disables prepared statements and uses only transaction-scoped settings and locks, so the transaction pooler (port 6543) should also work for it, but that is untested |
 
-TLS to Supabase is verified (`sslmode=verify-full` with Supabase's root CA, shipped in the
-bot image). Mind the free-tier connection limit when sizing both pools.
+TLS to Supabase is verified (`sslmode=verify-full` with Supabase's root CA, shipped in both
+images at `/etc/tatarbot/supabase-root-2021.crt`). Mind the free-tier connection limit when sizing both pools.
 
 ## Backups and retention
 
 The database itself is managed by Supabase (see
-[infra/aws/README.md](../../infra/aws/README.md#persistent-data-and-backups)). Nothing here
-deletes data on a schedule except the bot's orphan sweep, which only removes S3 objects that
-no row references.
+[infra/gcp/README.md](../../infra/gcp/README.md#persistent-data)). Nothing here deletes data
+on a schedule except the bot's orphan sweep, which only removes stored objects that no row
+references, and the runtime's history retention (`CONVERSATION_RETENTION_DAYS`).
