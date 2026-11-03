@@ -25,7 +25,19 @@ adapters/outbound/          agent_http (runtime client), songbird_voice + icy (p
 tls.rs                      process-wide rustls crypto provider (see below)
 migrations/, .sqlx/         Postgres schema and the offline query cache
 stations.toml               default radio stations (embedded)
+ingest/                     ADR 0004, TatarBot's side of the ingest boundary: producer
+                            (submit /upload jobs), pipeline (audio.opus-v1), consumer (library
+                            hooks), outbox + notice (notifications), gcs (stores without HMAC)
+adapters/inbound/discord/notifications.rs   delivers upload outcomes from the outbox
+bin/ingest_worker.rs        the Cloud Run ingest worker binary (`ingest-worker`)
+crates/ingest-core/         the generic ingestion core (no Discord): jobs, leases, producer
+                            policy, kill switch, ID-token verification, Cloud Tasks and GCS
+                            clients, HTTP API (see its README)
 ```
+
+The package is a Cargo workspace (`crates/ingest-core` is a member) with two binaries: the
+bot (`tatarbot-discord`, the default image target) and the ingest worker (`ingest-worker`,
+`docker build --target worker`).
 
 ## Configuration
 
@@ -46,7 +58,10 @@ stations.toml               default radio stations (embedded)
 | `MUSIC_UPLOAD_ROLE` | no | `DJ` | Role name (per server) that may upload and delete others' tracks; Manage Server always may |
 | `MUSIC_GUILD_QUOTA_MB` | no | `500` | Library storage per server |
 | `DATABASE_MAX_CONNECTIONS` | no | `3` | Pool size (keep small for Supavisor session mode) |
-| `FFMPEG_PATH`, `FFPROBE_PATH` | no | on `PATH` | ffmpeg binaries (bundled in the image) |
+| `FFMPEG_PATH`, `FFPROBE_PATH` | no | on `PATH` | ffmpeg binaries (bundled in the image). Bare names are resolved against `PATH` at startup, because ffmpeg runs with an empty environment |
+| `LIBRARY_PROCESSING` | no | `local` | `worker`: `/upload` is processed by the ingest worker (ADR 0004) instead of in the bot |
+| `INGEST_URL`, `INGEST_ID_TOKEN_FILE` | with `worker` | – | The worker's URL, and a Google ID token for it (refreshed by the host), sent as `Authorization: Bearer` |
+| `LIBRARY_STORAGE` | no | `s3` | `gcs`: play library objects with a read-only downscoped token from `GCS_TOKEN_FILE` instead of HMAC-signed URLs; needs `worker` |
 | `AWS_*` | for the library | ECS task role | S3 credentials and region (default AWS chain) |
 
 Setting only one of `DATABASE_URL` / `MUSIC_S3_BUCKET` is a startup error. With neither, the

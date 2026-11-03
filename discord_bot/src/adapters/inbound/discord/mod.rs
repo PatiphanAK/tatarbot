@@ -9,6 +9,7 @@ mod convert;
 mod handler;
 mod library;
 mod music;
+pub mod notifications;
 mod presenter;
 mod respond;
 
@@ -37,6 +38,7 @@ pub async fn run(
     voice: Arc<Songbird>,
 ) -> Result<(), AppError> {
     let intents = intents();
+    let uploads = library.as_ref().and_then(|l| l.uploads.clone());
 
     let mut client = Client::builder(&config.token, intents)
         .event_handler(handler::Handler::new(chat, music, library))
@@ -51,6 +53,21 @@ pub async fn run(
             tracing::info!("shutting down");
             return Ok(());
         }
+    }
+
+    // Worker mode (ADR 0004): deliver upload outcomes and re-submit stragglers.
+    if let Some(queue) = uploads {
+        if client.http.application_id().is_none() {
+            match client.http.get_current_application_info().await {
+                Ok(app) => client.http.set_application_id(app.id),
+                Err(err) => tracing::warn!(%err, "cannot read the application id yet"),
+            }
+        }
+        let sender: Arc<dyn notifications::DiscordSender> =
+            Arc::new(notifications::SerenitySender(client.http.clone()));
+        tokio::spawn(notifications::run(queue.pool().clone(), sender));
+        tokio::spawn(crate::ingest::producer::run_resubmitter(queue));
+        tracing::info!("library uploads go to the ingest worker");
     }
 
     let shard_manager = client.shard_manager.clone();

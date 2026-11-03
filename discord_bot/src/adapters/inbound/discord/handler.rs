@@ -19,6 +19,8 @@ use crate::domain::music::{GuildId, UserId as MusicUserId};
 pub struct LibraryCommands {
     pub service: Arc<dyn LibraryService>,
     pub upload_role: String,
+    /// Worker mode (ADR 0004): `/upload` submits to the ingest worker instead.
+    pub uploads: Option<Arc<crate::ingest::producer::UploadQueue>>,
 }
 
 pub struct Handler {
@@ -96,7 +98,14 @@ impl Handler {
             }
             Interaction::Command(cmd) if library::is_library_command(&cmd.data.name) => {
                 if let Some(lib) = &self.library {
-                    library::handle(ctx, cmd, lib.service.as_ref(), &lib.upload_role).await;
+                    library::handle(
+                        ctx,
+                        cmd,
+                        lib.service.as_ref(),
+                        &lib.upload_role,
+                        lib.uploads.as_deref(),
+                    )
+                    .await;
                 }
             }
             // Always answer: an unanswered autocomplete shows "Loading options

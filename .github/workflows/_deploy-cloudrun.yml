@@ -1,4 +1,5 @@
-# Reusable: deploy the Agent Runtime image to its Cloud Run service (infra/gcp/cloudrun.tf).
+# Reusable: deploy an image to one of the Cloud Run services: the Agent Runtime
+# (infra/gcp/cloudrun.tf) or the ingest worker (infra/gcp/ingest.tf, ADR 0004).
 #
 # 1. Only commits already on main can be deployed.
 # 2. The image is tagged sha-<commit>; Artifact Registry tags are immutable, so an existing
@@ -10,7 +11,8 @@
 #    fails the job, so a bad image rolls itself back.
 #
 # Requires, in the `production` environment variables (terraform output github_actions_variables):
-#   GCP_PROJECT_ID, GCP_REGION, GCP_WIF_PROVIDER, GCP_DEPLOY_SA, GCP_RUNTIME_SERVICE
+#   GCP_PROJECT_ID, GCP_REGION, GCP_WIF_PROVIDER, GCP_DEPLOY_SA, and the service's variable
+#   (GCP_RUNTIME_SERVICE or GCP_INGEST_SERVICE).
 
 name: Deploy to Cloud Run (reusable)
 
@@ -21,6 +23,26 @@ on:
         description: Commit, branch or tag to deploy (must be on main)
         type: string
         required: true
+      component:
+        description: Label for the job name and summary (runtime, ingest)
+        type: string
+        default: runtime
+      context:
+        description: Docker build context
+        type: string
+        default: agent_runtime
+      target:
+        description: Docker build target (empty = last stage)
+        type: string
+        default: ""
+      repository:
+        description: Artifact Registry repository name (without the region and project)
+        type: string
+        default: tatarbot-runtime
+      service_variable:
+        description: Name of the environment variable that holds the Cloud Run service name
+        type: string
+        default: GCP_RUNTIME_SERVICE
 
 permissions:
   contents: read
@@ -28,7 +50,7 @@ permissions:
 
 jobs:
   deploy:
-    name: deploy runtime
+    name: deploy ${{ inputs.component }}
     runs-on: ubuntu-24.04
     environment: production
     env:
@@ -36,14 +58,17 @@ jobs:
       GCP_REGION: ${{ vars.GCP_REGION }}
       GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
       GCP_DEPLOY_SA: ${{ vars.GCP_DEPLOY_SA }}
-      GCP_RUNTIME_SERVICE: ${{ vars.GCP_RUNTIME_SERVICE }}
+      SERVICE_VARIABLE: ${{ inputs.service_variable }}
+      CLOUD_RUN_SERVICE: ${{ vars[inputs.service_variable] }}
+      REPOSITORY: ${{ inputs.repository }}
     steps:
       - name: Require deployment configuration
         run: |
           missing=""
-          for v in GCP_PROJECT_ID GCP_REGION GCP_WIF_PROVIDER GCP_DEPLOY_SA GCP_RUNTIME_SERVICE; do
+          for v in GCP_PROJECT_ID GCP_REGION GCP_WIF_PROVIDER GCP_DEPLOY_SA; do
             [ -n "${!v}" ] || missing="$missing $v"
           done
+          [ -n "$CLOUD_RUN_SERVICE" ] || missing="$missing $SERVICE_VARIABLE"
           if [ -n "$missing" ]; then
             echo "::error::Deployment is not configured. Set these variables on the 'production' environment:$missing (see infra/gcp/README.md)."
             exit 1
@@ -62,7 +87,7 @@ jobs:
           git merge-base --is-ancestor "$sha" origin/main \
             || { echo "::error::$sha is not on main; only reviewed commits are deployed."; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "image=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/tatarbot-runtime:sha-${sha::12}" >> "$GITHUB_OUTPUT"
+          echo "image=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$REPOSITORY:sha-${sha::12}" >> "$GITHUB_OUTPUT"
 
       - uses: google-github-actions/auth@v3
         with:
@@ -92,28 +117,29 @@ jobs:
       - uses: docker/build-push-action@v7
         if: steps.exists.outputs.found != 'true'
         with:
-          context: agent_runtime
+          context: ${{ inputs.context }}
+          target: ${{ inputs.target }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.commit.outputs.image }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.commit.outputs.sha }}
-          cache-from: type=gha,scope=tatarbot-runtime-amd64
-          cache-to: type=gha,mode=max,scope=tatarbot-runtime-amd64
+          cache-from: type=gha,scope=${{ inputs.repository }}-amd64
+          cache-to: type=gha,mode=max,scope=${{ inputs.repository }}-amd64
 
       - name: Roll a new revision (traffic moves only if it starts)
         env:
           IMAGE: ${{ steps.commit.outputs.image }}
         run: |
-          gcloud run services update "$GCP_RUNTIME_SERVICE" \
+          gcloud run services update "$CLOUD_RUN_SERVICE" \
             --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
             --image "$IMAGE" --quiet
-          gcloud run services describe "$GCP_RUNTIME_SERVICE" \
+          gcloud run services describe "$CLOUD_RUN_SERVICE" \
             --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
             --format 'value(status.latestReadyRevisionName,status.traffic[0].percent)'
 
       - name: Summary
         env:
           IMAGE: ${{ steps.commit.outputs.image }}
-        run: echo "Deployed \`$IMAGE\` to Cloud Run service \`$GCP_RUNTIME_SERVICE\`." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Deployed \`$IMAGE\` to Cloud Run service \`$CLOUD_RUN_SERVICE\`." >> "$GITHUB_STEP_SUMMARY"

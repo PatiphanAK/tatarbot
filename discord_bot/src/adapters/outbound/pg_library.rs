@@ -20,7 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::application::ports::{
     AddOutcome, LibraryRepository, NewTrack, ObjectStore, RepoError, StoredAudio, SweepReport,
@@ -87,6 +87,11 @@ impl PgLibrary {
             .acquire_timeout(Duration::from_secs(5))
             .connect_lazy_with(options);
         Ok(Self::from_pool(pool, false))
+    }
+
+    /// The underlying pool (the ingest outbox and request tables share it).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     pub fn from_pool(pool: PgPool, available: bool) -> Self {
@@ -223,6 +228,119 @@ impl PgLibrary {
     }
 }
 
+/// Why `PgLibrary::add_in` failed.
+#[derive(Debug, thiserror::Error)]
+pub enum AddError {
+    #[error("database: {0}")]
+    Db(sqlx::Error),
+    #[error(transparent)]
+    Repo(RepoError),
+}
+
+impl PgLibrary {
+    /// `add`'s locked checks and insert inside the caller's transaction (the ingest worker
+    /// commits it together with the job's state, ADR 0004). Takes the guild then the hash
+    /// advisory lock, re-checks duplicates and quota, calls `store.put_file` for new audio,
+    /// inserts the row. Nothing is committed here.
+    pub async fn add_in(
+        conn: &mut PgConnection,
+        track: NewTrack<'_>,
+        store: &dyn ObjectStore,
+        prefix: &str,
+    ) -> Result<AddOutcome, AddError> {
+        let guild = track.guild.0 as i64;
+        // Guild first, then hash; `remove` and `sweep` take only the hash lock,
+        // so the order can't deadlock.
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock($1, $2)",
+            GUILD_LOCK_SPACE,
+            guild_lock_key(track.guild)
+        )
+        .execute(&mut *conn)
+        .await
+        .map_err(AddError::Db)?;
+        sqlx::query!("SELECT pg_advisory_xact_lock($1)", track.hash.lock_key())
+            .execute(&mut *conn)
+            .await
+            .map_err(AddError::Db)?;
+
+        if let Some(row) = sqlx::query_as!(
+            Row,
+            "SELECT * FROM library_tracks WHERE guild_id = $1 AND content_hash = $2",
+            guild,
+            track.hash.as_str()
+        )
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(AddError::Db)?
+        {
+            return Ok(AddOutcome::AlreadyInLibrary(
+                row.try_into().map_err(AddError::Repo)?,
+            ));
+        }
+
+        // Under the lock, rows are the truth: if any exists, its object exists.
+        let stored = sqlx::query!(
+            "SELECT size_bytes, duration_ms FROM library_tracks WHERE content_hash = $1 LIMIT 1",
+            track.hash.as_str()
+        )
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(AddError::Db)?;
+        let (size_bytes, duration_ms, reused_audio) = match (&stored, &track.audio) {
+            (Some(row), _) => (row.size_bytes, row.duration_ms, true),
+            (None, Some(audio)) => (
+                audio.size_bytes as i64,
+                audio.duration.as_millis().min(i32::MAX as u128) as i32,
+                false,
+            ),
+            (None, None) => return Ok(AddOutcome::NeedsAudio),
+        };
+
+        let used = sqlx::query_scalar!(
+            r#"SELECT COALESCE(SUM(size_bytes), 0)::BIGINT AS "used!" FROM library_tracks WHERE guild_id = $1"#,
+            guild
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AddError::Db)?;
+        if (used + size_bytes) as u64 > track.quota_bytes {
+            return Ok(AddOutcome::QuotaExceeded {
+                used_bytes: used.max(0) as u64,
+            });
+        }
+
+        if let (false, Some(audio)) = (reused_audio, &track.audio) {
+            // While the hash lock is held: no delete or sweep can interleave.
+            store
+                .put_file(&track.hash.object_key(prefix), audio.path)
+                .await
+                .map_err(|e| AddError::Repo(e.into()))?;
+        }
+
+        let row = sqlx::query_as!(
+            Row,
+            "INSERT INTO library_tracks
+                 (guild_id, content_hash, title, duration_ms, size_bytes, uploaded_by)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *",
+            guild,
+            track.hash.as_str(),
+            track.title,
+            duration_ms,
+            size_bytes,
+            track.uploaded_by.0 as i64
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AddError::Db)?;
+        Ok(AddOutcome::Added {
+            track: row.try_into().map_err(AddError::Repo)?,
+            reused_audio,
+        })
+    }
+}
+
 /// Postgres `LIKE` pattern escaping (`\` is the escape character).
 fn escape_like(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -285,94 +403,19 @@ impl LibraryRepository for PgLibrary {
         store: &dyn ObjectStore,
         prefix: &str,
     ) -> Result<AddOutcome, RepoError> {
-        let guild = track.guild.0 as i64;
         let mut tx = self.begin().await?;
-        // Guild first, then hash; `remove` and `sweep` take only the hash lock,
-        // so the order can't deadlock.
-        sqlx::query!(
-            "SELECT pg_advisory_xact_lock($1, $2)",
-            GUILD_LOCK_SPACE,
-            guild_lock_key(track.guild)
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| self.fail(e))?;
-        self.lock_hash(&mut tx, &track.hash).await?;
-
-        if let Some(row) = sqlx::query_as!(
-            Row,
-            "SELECT * FROM library_tracks WHERE guild_id = $1 AND content_hash = $2",
-            guild,
-            track.hash.as_str()
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| self.fail(e))?
-        {
-            return Ok(AddOutcome::AlreadyInLibrary(row.try_into()?));
+        let outcome = Self::add_in(&mut tx, track, store, prefix)
+            .await
+            .map_err(|e| match e {
+                AddError::Db(e) => self.fail(e),
+                AddError::Repo(e) => e,
+            })?;
+        if matches!(outcome, AddOutcome::Added { .. }) {
+            // If this commit fails after a PUT, the object is an orphan: the sweep
+            // removes it once it is older than the grace period.
+            tx.commit().await.map_err(|e| self.fail(e))?;
         }
-
-        // Under the lock, rows are the truth: if any exists, its object exists.
-        let stored = sqlx::query!(
-            "SELECT size_bytes, duration_ms FROM library_tracks WHERE content_hash = $1 LIMIT 1",
-            track.hash.as_str()
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| self.fail(e))?;
-        let (size_bytes, duration_ms, reused_audio) = match (&stored, &track.audio) {
-            (Some(row), _) => (row.size_bytes, row.duration_ms, true),
-            (None, Some(audio)) => (
-                audio.size_bytes as i64,
-                audio.duration.as_millis().min(i32::MAX as u128) as i32,
-                false,
-            ),
-            (None, None) => return Ok(AddOutcome::NeedsAudio),
-        };
-
-        let used = sqlx::query_scalar!(
-            r#"SELECT COALESCE(SUM(size_bytes), 0)::BIGINT AS "used!" FROM library_tracks WHERE guild_id = $1"#,
-            guild
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| self.fail(e))?;
-        if (used + size_bytes) as u64 > track.quota_bytes {
-            return Ok(AddOutcome::QuotaExceeded {
-                used_bytes: used.max(0) as u64,
-            });
-        }
-
-        if let (false, Some(audio)) = (reused_audio, &track.audio) {
-            // While the hash lock is held: no delete or sweep can interleave.
-            store
-                .put_file(&track.hash.object_key(prefix), audio.path)
-                .await?;
-        }
-
-        let row = sqlx::query_as!(
-            Row,
-            "INSERT INTO library_tracks
-                 (guild_id, content_hash, title, duration_ms, size_bytes, uploaded_by)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING *",
-            guild,
-            track.hash.as_str(),
-            track.title,
-            duration_ms,
-            size_bytes,
-            track.uploaded_by.0 as i64
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| self.fail(e))?;
-        // If this commit fails after a PUT, the object is an orphan: the sweep
-        // removes it once it is older than the grace period.
-        tx.commit().await.map_err(|e| self.fail(e))?;
-        Ok(AddOutcome::Added {
-            track: row.try_into()?,
-            reused_audio,
-        })
+        Ok(outcome)
     }
 
     async fn remove(

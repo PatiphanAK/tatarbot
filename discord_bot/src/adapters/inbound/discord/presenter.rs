@@ -8,6 +8,7 @@ use crate::application::ports::{
 };
 use crate::domain::library::LibraryTrack;
 use crate::domain::music::TrackInfo;
+use crate::ingest::notice::{Notice, TrackSnapshot};
 
 /// Discord's maximum message length, in characters.
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
@@ -152,6 +153,89 @@ pub fn uploaded(outcome: &UploadOutcome) -> String {
         library_entry(&outcome.track),
         escape(&outcome.track.title)
     )
+}
+
+pub fn upload_queued(title: &str) -> String {
+    format!(
+        "⏳ Processing **{}**… I'll post here when it's in the library.",
+        escape(title)
+    )
+}
+
+pub fn upload_will_retry(title: &str) -> String {
+    format!(
+        "⏳ Got **{}**. The processor is busy, so I'll keep trying and post here when it's done.",
+        escape(title)
+    )
+}
+
+/// The worker refused the submission (`error` code from the job API).
+pub fn upload_refused(code: &str) -> String {
+    match code {
+        "paused" => {
+            "⏸️ Uploads are paused right now. Radio, links and the library still work.".into()
+        }
+        "too_many_active" => {
+            "⏳ You already have uploads in progress. Wait for them to finish first.".into()
+        }
+        "tenant_rate_limited" => {
+            "⏳ This server has uploaded a lot in the last hour. Try again later.".into()
+        }
+        "policy_denied" => library_error(&LibraryError::NotAllowed),
+        _ => GENERIC_FAILURE.into(),
+    }
+}
+
+/// The final message for an upload processed by the ingest worker. Never leaks internals.
+pub fn upload_notice(notice: &Notice) -> String {
+    use crate::domain::library::{MAX_DURATION, MAX_UPLOAD_BYTES};
+    match notice {
+        Notice::Succeeded {
+            track,
+            reused_audio,
+        } => match track.to_track() {
+            Some(track) => uploaded(&UploadOutcome {
+                track,
+                reused_audio: *reused_audio,
+            }),
+            None => "📥 Added your track to the library.".into(),
+        },
+        Notice::Failed { code, data } => {
+            let error = match code.as_str() {
+                "already_in_library" => match data
+                    .get("existing")
+                    .and_then(|v| serde_json::from_value::<TrackSnapshot>(v.clone()).ok())
+                    .and_then(|t| t.to_track())
+                {
+                    Some(track) => LibraryError::AlreadyInLibrary(track),
+                    None => return "📚 That's already in the library.".into(),
+                },
+                "quota_exceeded" => LibraryError::QuotaExceeded {
+                    used_bytes: data["used_bytes"].as_u64().unwrap_or(0),
+                    quota_bytes: data["quota_bytes"].as_u64().unwrap_or(0),
+                },
+                "too_large" => LibraryError::TooLarge {
+                    max_bytes: MAX_UPLOAD_BYTES,
+                },
+                "too_long" => LibraryError::TooLong { max: MAX_DURATION },
+                "not_audio" | "unsupported_format" => LibraryError::NotAudio,
+                "source_gone" => {
+                    return "🔗 I couldn't download that attachment any more. Upload it again."
+                        .into();
+                }
+                "processing_limit" | "processing_failed" => LibraryError::Processing(String::new()),
+                "paused" | "too_many_active" | "tenant_rate_limited" | "policy_denied" => {
+                    return upload_refused(code);
+                }
+                _ => LibraryError::Internal(String::new()),
+            };
+            library_error(&error)
+        }
+        Notice::Cancelled => "🛑 Upload cancelled.".into(),
+        Notice::SubmissionFailed => {
+            "💥 I couldn't start processing that upload. Please try again.".into()
+        }
+    }
 }
 
 pub fn deleted(track: &LibraryTrack) -> String {
@@ -440,6 +524,37 @@ mod tests {
         let label = library_choice(&library_track(&"x".repeat(100), 59));
         assert_eq!(label.chars().count(), 100);
         assert!(label.ends_with(" (0:59)"));
+    }
+
+    #[test]
+    fn upload_notices_render_without_internals() {
+        use serde_json::json;
+        let failed = |code: &str, data| {
+            upload_notice(&Notice::Failed {
+                code: code.into(),
+                data,
+            })
+        };
+        assert!(
+            failed(
+                "quota_exceeded",
+                json!({ "used_bytes": 1_048_576, "quota_bytes": 2_097_152 })
+            )
+            .contains("space")
+        );
+        assert!(failed("not_audio", json!(null)).contains("audio file"));
+        assert!(failed("source_gone", json!(null)).contains("Upload it again"));
+        for code in [
+            "internal",
+            "retries_exhausted",
+            "timed_out",
+            "something-new",
+        ] {
+            assert_eq!(failed(code, json!(null)), GENERIC_FAILURE);
+        }
+        assert!(failed("already_in_library", json!({})).contains("already"));
+        assert!(upload_notice(&Notice::Cancelled).contains("cancelled"));
+        assert!(upload_refused("paused").contains("paused"));
     }
 
     #[test]

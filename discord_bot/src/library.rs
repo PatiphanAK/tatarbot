@@ -12,8 +12,10 @@ use crate::adapters::outbound::pg_library::{self, PgLibrary};
 use crate::adapters::outbound::s3_store::{S3Settings, S3Store};
 use crate::application::ports::{LibraryService, ObjectStore};
 use crate::application::use_cases::{LibrarySettings, LibraryUseCase};
-use crate::config::LibraryConfig;
+use crate::config::{LibraryConfig, LibraryProcessing, LibraryStorage};
 use crate::error::AppError;
+use crate::ingest::gcs::GcsReadStore;
+use crate::ingest::producer::{IngestClient, UploadQueue};
 
 /// Orphans younger than this are never swept (an upload may be mid-flight).
 const SWEEP_GRACE: Duration = Duration::from_secs(60 * 60);
@@ -23,6 +25,10 @@ pub struct Library {
     pub service: Arc<dyn LibraryService>,
     pub store: Arc<dyn ObjectStore>,
     pub upload_role: String,
+    /// Worker mode (ADR 0004): uploads go to the ingest worker through this queue.
+    pub uploads: Option<Arc<UploadQueue>>,
+    /// GCS playback: the downscoped bearer token file, re-read per track.
+    pub playback_token_file: Option<std::path::PathBuf>,
 }
 
 pub async fn build(cfg: LibraryConfig) -> Result<Library, AppError> {
@@ -34,31 +40,57 @@ pub async fn build(cfg: LibraryConfig) -> Result<Library, AppError> {
     })?;
     tokio::spawn(repo.clone().supervise());
 
-    let store = S3Store::new(S3Settings {
-        bucket: cfg.bucket,
-        endpoint: cfg.endpoint,
-    })
-    .await;
-    if cfg.create_bucket {
-        let store = store.clone();
-        tokio::spawn(async move {
-            for attempt in 1..=10 {
-                match store.ensure_bucket().await {
-                    Ok(()) => return,
-                    Err(err) => tracing::warn!(%err, attempt, "cannot create library bucket yet"),
-                }
-                tokio::time::sleep(Duration::from_secs(3)).await;
+    let worker_mode = matches!(cfg.processing, LibraryProcessing::Worker { .. });
+    let (shared_store, playback_token_file): (Arc<dyn ObjectStore>, _) = match &cfg.storage {
+        LibraryStorage::S3 => {
+            let store = S3Store::new(S3Settings {
+                bucket: cfg.bucket.clone(),
+                endpoint: cfg.endpoint.clone(),
+            })
+            .await;
+            if cfg.create_bucket {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    for attempt in 1..=10 {
+                        match store.ensure_bucket().await {
+                            Ok(()) => return,
+                            Err(err) => {
+                                tracing::warn!(%err, attempt, "cannot create library bucket yet")
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    }
+                });
             }
-        });
+            (Arc::new(store), None)
+        }
+        LibraryStorage::GcsBearer { token_file } => (
+            Arc::new(GcsReadStore::new(cfg.bucket.clone())),
+            Some(token_file.clone()),
+        ),
+    };
+    // In worker mode the worker sweeps orphans (it holds the write permission).
+    if !worker_mode {
+        tokio::spawn(pg_library::sweep_periodically(
+            repo.clone(),
+            shared_store.clone(),
+            cfg.prefix.clone(),
+            SWEEP_GRACE,
+            SWEEP_INTERVAL,
+        ));
     }
-    let shared_store: Arc<dyn ObjectStore> = Arc::new(store.clone());
-    tokio::spawn(pg_library::sweep_periodically(
-        repo.clone(),
-        shared_store.clone(),
-        cfg.prefix.clone(),
-        SWEEP_GRACE,
-        SWEEP_INTERVAL,
-    ));
+    let uploads = match &cfg.processing {
+        LibraryProcessing::Local => None,
+        LibraryProcessing::Worker { url, id_token_file } => {
+            let client =
+                IngestClient::new(url.clone(), id_token_file.clone(), Duration::from_secs(30))
+                    .map_err(|e| AppError::InvalidEnv {
+                        key: "INGEST_URL",
+                        reason: e.to_string(),
+                    })?;
+            Some(Arc::new(UploadQueue::new(repo.pool().clone(), client)))
+        }
+    };
 
     let ffmpeg = Ffmpeg::new(FfmpegSettings {
         ffmpeg: cfg.ffmpeg,
@@ -68,7 +100,7 @@ pub async fn build(cfg: LibraryConfig) -> Result<Library, AppError> {
     let fetcher = HttpAttachmentFetcher::new(audio_http::client()?);
     let service = LibraryUseCase::new(
         repo,
-        store,
+        shared_store.clone(),
         ffmpeg,
         fetcher,
         LibrarySettings::new(cfg.prefix, cfg.quota_bytes),
@@ -77,6 +109,8 @@ pub async fn build(cfg: LibraryConfig) -> Result<Library, AppError> {
         service: Arc::new(service),
         store: shared_store,
         upload_role: cfg.upload_role,
+        uploads,
+        playback_token_file,
     })
 }
 
@@ -189,6 +223,7 @@ mod tests {
             Some(Arc::new(LibraryAudio {
                 store: store_dyn.clone(),
                 http: audio_http::trusted_client().unwrap(),
+                bearer_token_file: None,
             })),
         );
         let input = voice

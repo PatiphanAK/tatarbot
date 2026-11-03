@@ -145,3 +145,19 @@ resource "google_service_account_iam_member" "deploy_act_as_runtime" {
   role               = "roles/iam.serviceAccountUser"
   member             = google_service_account.deploy.member
 }
+
+# ADR 0004: roll new ingest worker revisions (image only; Terraform owns the rest).
+resource "google_cloud_run_v2_service_iam_member" "deploy_ingest" {
+  count    = local.ingest_n
+  name     = google_cloud_run_v2_service.ingest[0].name
+  location = var.region
+  role     = "roles/run.developer"
+  member   = google_service_account.deploy.member
+}
+
+resource "google_service_account_iam_member" "deploy_act_as_ingest" {
+  count              = local.ingest_n
+  service_account_id = google_service_account.ingest[0].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = google_service_account.deploy.member
+}

@@ -1,28 +1,18 @@
 //! Composition root: the only place that knows about every concrete type.
 
-mod adapters;
-mod application;
-mod config;
-mod domain;
-mod error;
-mod instance_lock;
-mod library;
-#[cfg(test)]
-mod test_support;
-mod tls;
-
 use std::sync::Arc;
 
-use adapters::inbound::discord;
-use adapters::outbound::agent_http::HttpAgentClient;
-use adapters::outbound::audio_http;
-use adapters::outbound::library_resolver::LibraryTrackResolver;
-use adapters::outbound::songbird_voice::{LibraryAudio, SongbirdVoice};
-use adapters::outbound::url_resolver::UrlTrackResolver;
-use application::ports::{ChatService, MusicService, TrackResolver};
-use application::use_cases::{ChatUseCase, MusicUseCase};
-use config::Config;
-use error::AppError;
+use tatarbot_discord::adapters::inbound::discord;
+use tatarbot_discord::adapters::outbound::agent_http::HttpAgentClient;
+use tatarbot_discord::adapters::outbound::audio_http;
+use tatarbot_discord::adapters::outbound::library_resolver::LibraryTrackResolver;
+use tatarbot_discord::adapters::outbound::songbird_voice::{LibraryAudio, SongbirdVoice};
+use tatarbot_discord::adapters::outbound::url_resolver::UrlTrackResolver;
+use tatarbot_discord::application::ports::{ChatService, MusicService, TrackResolver};
+use tatarbot_discord::application::use_cases::{ChatUseCase, MusicUseCase};
+use tatarbot_discord::config::Config;
+use tatarbot_discord::error::AppError;
+use tatarbot_discord::{instance_lock, library, tls};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -61,6 +51,7 @@ async fn main() -> Result<(), AppError> {
         Some(lib) => Some(Arc::new(LibraryAudio {
             store: lib.store.clone(),
             http: audio_http::trusted_client()?,
+            bearer_token_file: lib.playback_token_file.clone(),
         })),
         None => None,
     };
@@ -87,6 +78,7 @@ async fn main() -> Result<(), AppError> {
     let library_commands = library.map(|lib| discord::LibraryCommands {
         service: lib.service,
         upload_role: lib.upload_role,
+        uploads: lib.uploads,
     });
     discord::run(config.discord, chat, music, library_commands, songbird).await
 }

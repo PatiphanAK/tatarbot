@@ -42,6 +42,9 @@ pub struct LibraryAudio {
     /// Plain client: presigned URLs point at our own bucket (localhost in dev),
     /// never at user input, so the public-address guard doesn't apply.
     pub http: reqwest_audio::Client,
+    /// GCS without HMAC (ADR 0004): `store` returns unsigned media URLs and this file holds
+    /// a downscoped read-only token, sent as `Authorization: Bearer` and re-read per track.
+    pub bearer_token_file: Option<std::path::PathBuf>,
 }
 
 /// What rides along with each Songbird track.
@@ -339,9 +342,26 @@ impl Compose for PresignedObject {
             .presign_get(&self.key, PRESIGN_TTL)
             .await
             .map_err(|e| AudioStreamError::Fail(Box::new(e)))?;
-        HttpRequest::new(self.library.http.clone(), url)
-            .create_async()
-            .await
+        match &self.library.bearer_token_file {
+            None => {
+                HttpRequest::new(self.library.http.clone(), url)
+                    .create_async()
+                    .await
+            }
+            Some(file) => {
+                let token = crate::ingest::gcs::read_token(file)
+                    .await
+                    .map_err(|e| AudioStreamError::Fail(Box::new(e)))?;
+                let mut headers = reqwest_audio::header::HeaderMap::new();
+                let value =
+                    reqwest_audio::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                        .map_err(|e| AudioStreamError::Fail(Box::new(e)))?;
+                headers.insert(reqwest_audio::header::AUTHORIZATION, value);
+                HttpRequest::new_with_headers(self.library.http.clone(), url, headers)
+                    .create_async()
+                    .await
+            }
+        }
     }
 
     fn should_create_async(&self) -> bool {
@@ -487,6 +507,54 @@ mod tests {
 
     const GUILD: GuildId = GuildId(1);
     const MINUTE: Duration = Duration::from_secs(60);
+
+    /// GCS playback without HMAC (ADR 0004): the unsigned media URL is fetched with the
+    /// downscoped token from the file, re-read when the track starts.
+    #[tokio::test]
+    async fn library_playback_sends_the_bearer_token_from_the_file() {
+        use axum::http::{HeaderMap, StatusCode};
+        use std::sync::Mutex;
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let recorder = seen.clone();
+        let router = axum::Router::new().route(
+            "/storage/v1/b/bkt/o/{key}",
+            axum::routing::get(move |headers: HeaderMap| {
+                let recorder = recorder.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .map(|v| v.to_str().unwrap().to_owned())
+                        .unwrap_or_default();
+                    recorder.lock().unwrap().push(auth.clone());
+                    if auth == "Bearer ya29.downscoped" {
+                        (StatusCode::OK, vec![0u8; 64])
+                    } else {
+                        (StatusCode::UNAUTHORIZED, Vec::new())
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("gcs-token");
+        std::fs::write(&token, "ya29.downscoped\n").unwrap();
+        let store: Arc<dyn ObjectStore> =
+            Arc::new(crate::ingest::gcs::GcsReadStore::new("bkt").with_api_base(base));
+        let mut object = PresignedObject {
+            library: Arc::new(LibraryAudio {
+                store,
+                http: audio_http::trusted_client().unwrap(),
+                bearer_token_file: Some(token),
+            }),
+            key: "library/ab.ogg".into(),
+        };
+        assert!(object.create_async().await.is_ok());
+        assert_eq!(seen.lock().unwrap().as_slice(), ["Bearer ya29.downscoped"]);
+    }
 
     #[test]
     fn dropped_streams_back_off_then_give_up() {

@@ -117,17 +117,8 @@ where
     F: AttachmentFetcher,
 {
     async fn upload(&self, request: UploadRequest) -> Result<UploadOutcome, LibraryError> {
-        if !request.can_upload {
-            return Err(LibraryError::NotAllowed);
-        }
         let max_bytes = self.settings.max_upload_bytes;
-        if request.attachment.declared_size > max_bytes {
-            return Err(LibraryError::TooLarge { max_bytes });
-        }
-        let title = match &request.title {
-            Some(title) => normalize_title(title).map_err(|_| LibraryError::InvalidTitle)?,
-            None => title_from_filename(&request.attachment.filename),
-        };
+        let title = check_upload(&request, max_bytes)?;
         self.available()?;
 
         let dir = tempfile::tempdir().map_err(|e| LibraryError::Internal(e.to_string()))?;
@@ -302,10 +293,26 @@ fn repo_error(err: RepoError) -> LibraryError {
     }
 }
 
+/// The checks every upload passes before any work, locally or through the ingest worker:
+/// permission, declared size, title. Returns the normalized title.
+pub fn check_upload(request: &UploadRequest, max_bytes: u64) -> Result<String, LibraryError> {
+    if !request.can_upload {
+        return Err(LibraryError::NotAllowed);
+    }
+    if request.attachment.declared_size > max_bytes {
+        return Err(LibraryError::TooLarge { max_bytes });
+    }
+    match &request.title {
+        Some(title) => normalize_title(title).map_err(|_| LibraryError::InvalidTitle),
+        None => Ok(title_from_filename(&request.attachment.filename)),
+    }
+}
+
 fn audio_error(err: AudioError) -> LibraryError {
     match err {
         AudioError::Unsupported => LibraryError::NotAudio,
         AudioError::Timeout => LibraryError::Processing("timed out".into()),
+        AudioError::ResourceLimit(reason) => LibraryError::Processing(reason),
         AudioError::Failed(reason) => LibraryError::Processing(reason),
     }
 }

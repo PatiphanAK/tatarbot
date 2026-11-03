@@ -85,7 +85,12 @@ struct ProbeFormat {
 }
 
 impl Ffmpeg {
-    pub fn new(settings: FfmpegSettings) -> Self {
+    /// Bare program names are resolved against this process's PATH now, because the children
+    /// run with an empty environment (`env_clear`): without PATH, the system default search
+    /// path applies, which doesn't include /usr/local/bin where the images install ffmpeg.
+    pub fn new(mut settings: FfmpegSettings) -> Self {
+        settings.ffmpeg = resolve_program(settings.ffmpeg);
+        settings.ffprobe = resolve_program(settings.ffprobe);
         Self { settings }
     }
 
@@ -117,14 +122,37 @@ impl Ffmpeg {
             return Ok(output.stdout);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit = describe_exit(&output.status);
         tracing::info!(
             program = %program.display(),
-            exit = %describe_exit(&output.status),
+            %exit,
             stderr = %stderr.chars().take(500).collect::<String>(),
             "audio processing refused or failed"
         );
-        Err(AudioError::Unsupported)
+        Err(classify_failure(&output.status, &stderr, exit))
     }
+}
+
+/// A signal or an allocation/thread failure means a resource limit was hit (the file may be
+/// fine); any other non-zero exit means ffmpeg refused the input.
+fn classify_failure(status: &std::process::ExitStatus, stderr: &str, exit: String) -> AudioError {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status.signal().is_some() {
+            return AudioError::ResourceLimit(exit);
+        }
+    }
+    let exhausted = [
+        "Resource temporarily unavailable",
+        "Cannot allocate memory",
+        "pthread_create",
+    ];
+    if exhausted.iter().any(|m| stderr.contains(m)) {
+        return AudioError::ResourceLimit(exit);
+    }
+    let _ = status;
+    AudioError::Unsupported
 }
 
 /// Exit code, or the signal and the limit it usually means: SIGXCPU = RLIMIT_CPU,
@@ -156,6 +184,20 @@ fn describe_exit(status: &std::process::ExitStatus) -> String {
         Some(code) => format!("exit code {code}"),
         None => status.to_string(),
     }
+}
+
+/// `name` as an absolute path from PATH, if it is a bare name found there; else unchanged
+/// (absolute and relative paths are used as given; a missing program fails at spawn).
+fn resolve_program(name: PathBuf) -> PathBuf {
+    if name.components().count() != 1 {
+        return name;
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|dir| dir.join(&name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or(name)
 }
 
 /// `file:` prefix: never interpret the path as a URL or protocol.
@@ -345,6 +387,58 @@ mod tests {
             (0, Duration::ZERO)
         );
         assert_eq!(parse_probe(b"garbage"), Err(AudioError::Unsupported));
+    }
+
+    #[test]
+    fn bare_program_names_resolve_against_path() {
+        // `sh` exists on every test host; the resolved path is absolute and runnable even
+        // with an empty environment.
+        let sh = resolve_program("sh".into());
+        assert!(sh.is_absolute(), "{sh:?}");
+        assert!(
+            std::process::Command::new(&sh)
+                .env_clear()
+                .args(["-c", "exit 0"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            resolve_program("/opt/x/ffmpeg".into()),
+            PathBuf::from("/opt/x/ffmpeg")
+        );
+        assert_eq!(
+            resolve_program("no-such-tool-xyz".into()),
+            PathBuf::from("no-such-tool-xyz")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classifies_resource_failures_apart_from_refusals() {
+        use std::os::unix::process::ExitStatusExt;
+        let killed = std::process::ExitStatus::from_raw(libc::SIGXCPU);
+        let exited = std::process::ExitStatus::from_raw(1 << 8);
+        assert!(matches!(
+            classify_failure(&killed, "", "x".into()),
+            AudioError::ResourceLimit(_)
+        ));
+        assert!(matches!(
+            classify_failure(
+                &exited,
+                "pthread_create() failed: Resource temporarily unavailable",
+                "x".into()
+            ),
+            AudioError::ResourceLimit(_)
+        ));
+        assert_eq!(
+            classify_failure(
+                &exited,
+                "Invalid data found when processing input",
+                "x".into()
+            ),
+            AudioError::Unsupported
+        );
     }
 
     // ---- Against the real binaries (`ffmpeg`/`ffprobe` on PATH).
