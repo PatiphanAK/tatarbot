@@ -865,6 +865,37 @@ mod tests {
         assert!(!store.has(&key));
     }
 
+    /// OWASP API1 (object-level authorization / IDOR): a track id from another guild is
+    /// invisible and untouchable through every repository operation.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "needs DATABASE_URL (make test-db)"]
+    async fn pg_tracks_are_isolated_per_guild(pool: PgPool) {
+        let repo = PgLibrary::from_pool(pool, true);
+        let store = FakeStore::default();
+        let h = hash(7);
+        let mine = added(add(&repo, &store, new_track(1, &h, Some(audio(10)))).await);
+        let other = GuildId(2);
+
+        assert_eq!(repo.get(other, mine.id).await.unwrap(), None);
+        assert_eq!(repo.find_in_guild(other, &h).await.unwrap(), None);
+        assert!(
+            repo.search(other, &mine.title, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(repo.recent(other, 10).await.unwrap().is_empty());
+        assert_eq!(repo.list(other, 0, 10).await.unwrap(), (vec![], 0));
+        assert_eq!(repo.used_bytes(other).await.unwrap(), 0);
+        assert_eq!(
+            repo.remove(other, mine.id, &store, PREFIX).await.unwrap(),
+            None
+        );
+        // Untouched for its own guild, and its object was never deleted.
+        assert_eq!(repo.get(GuildId(1), mine.id).await.unwrap(), Some(mine));
+        assert!(store.log().iter().all(|op| !op.starts_with("delete")));
+    }
+
     /// Race 1: a delete removing the last row (and the object) vs an upload of
     /// the same hash that, from an earlier hint, expects the object to exist.
     /// The upload must wait, then store the object again, never attach a row

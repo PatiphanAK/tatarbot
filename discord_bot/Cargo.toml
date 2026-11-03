@@ -56,5 +56,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
+# Paused, controllable time for rate-limit tests.
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 # Same WebSocket client Songbird uses for voice: tls.rs tests its TLS path.
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }

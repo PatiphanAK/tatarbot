@@ -9,7 +9,7 @@ use tatarbot_discord::adapters::outbound::library_resolver::LibraryTrackResolver
 use tatarbot_discord::adapters::outbound::songbird_voice::{LibraryAudio, SongbirdVoice};
 use tatarbot_discord::adapters::outbound::url_resolver::UrlTrackResolver;
 use tatarbot_discord::application::ports::{ChatService, MusicService, TrackResolver};
-use tatarbot_discord::application::use_cases::{ChatUseCase, MusicUseCase};
+use tatarbot_discord::application::use_cases::{ChatLimiter, ChatUseCase, MusicUseCase};
 use tatarbot_discord::config::Config;
 use tatarbot_discord::error::AppError;
 use tatarbot_discord::{instance_lock, library, tls};
@@ -37,7 +37,11 @@ async fn main() -> Result<(), AppError> {
         config.agent.id_token_file.clone(),
         config.agent.timeout,
     )?;
-    let chat: Arc<dyn ChatService> = Arc::new(ChatUseCase::new(agent));
+    tracing::info!(limits = ?config.chat_limits, "chat admission control");
+    let chat: Arc<dyn ChatService> = Arc::new(ChatUseCase::new(
+        agent,
+        ChatLimiter::new(config.chat_limits.clone()),
+    ));
 
     // Server library (optional): Postgres metadata, S3 audio, ffmpeg.
     let library = match config.library {

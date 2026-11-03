@@ -6,6 +6,7 @@ use crate::application::ports::{
     ChatError, LibraryError, LibraryPage, MusicError, PlayOutcome, ResolveError, UploadOutcome,
     VoiceError,
 };
+use crate::application::use_cases::ChatLimited;
 use crate::domain::library::LibraryTrack;
 use crate::domain::music::TrackInfo;
 use crate::ingest::notice::{Notice, TrackSnapshot};
@@ -153,6 +154,24 @@ pub fn uploaded(outcome: &UploadOutcome) -> String {
         library_entry(&outcome.track),
         escape(&outcome.track.title)
     )
+}
+
+/// Chat turned away by the rate limits or because the bot is busy (sent at most once per
+/// user per notice interval).
+pub fn chat_limited(limited: &ChatLimited) -> String {
+    match limited {
+        ChatLimited::User { retry_after, .. } => format!(
+            "🐢 Slow down a little: you can ask again in {} s.",
+            retry_after.as_secs().max(1)
+        ),
+        ChatLimited::Guild { retry_after, .. } => format!(
+            "🚦 This server is chatting a lot right now. Try again in {} s.",
+            retry_after.as_secs().max(1)
+        ),
+        ChatLimited::Busy { .. } => {
+            "🚦 I'm answering a lot of people right now. Try again in a moment.".into()
+        }
+    }
 }
 
 pub fn upload_queued(title: &str) -> String {

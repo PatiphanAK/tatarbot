@@ -478,16 +478,23 @@ mod tests {
 
     #[tokio::test]
     async fn links_are_never_played_from_chat() {
-        let music = FakeMusic::new();
-        let link = ChatAction::PlayTrack("https://evil.example/a.mp3".into());
-
-        let outcomes = execute(&music, in_voice(), &[link]).await;
-
-        assert!(
-            music.calls.lock().unwrap().is_empty(),
-            "music.play must not be called"
-        );
-        assert_eq!(compose("", &outcomes), [presenter::CHAT_LINK_REFUSED]);
-        assert!(!reports(&outcomes)[0].ok);
+        // Whatever the model is talked into returning, a link never reaches /play's fetcher:
+        // any scheme, any case, surrounding whitespace, internal targets.
+        for link in [
+            "https://evil.example/a.mp3",
+            "HTTP://EVIL.EXAMPLE/A.MP3",
+            "  http://169.254.169.254/computeMetadata/v1/  ",
+            "file:///etc/passwd",
+            "gopher://10.0.0.1:6379/_FLUSHALL",
+        ] {
+            let music = FakeMusic::new();
+            let outcomes = execute(&music, in_voice(), &[ChatAction::PlayTrack(link.into())]).await;
+            assert!(
+                music.calls.lock().unwrap().is_empty(),
+                "{link}: music.play must not be called"
+            );
+            assert_eq!(compose("", &outcomes), [presenter::CHAT_LINK_REFUSED]);
+            assert!(!reports(&outcomes)[0].ok);
+        }
     }
 }
