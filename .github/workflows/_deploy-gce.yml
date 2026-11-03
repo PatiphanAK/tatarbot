@@ -65,7 +65,7 @@ jobs:
           sha="$(git rev-parse HEAD)"
           git merge-base --is-ancestor "$sha" origin/main \
             || { echo "::error::$sha is not on main; only reviewed commits are deployed."; exit 1; }
-          image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/tatarbot-$SERVICE:sha-${sha::12}"
+          image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/tatarbot-$SERVICE/tatarbot-$SERVICE:sha-${sha::12}"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 

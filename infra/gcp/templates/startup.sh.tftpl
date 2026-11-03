@@ -188,7 +188,7 @@ set -euo pipefail
 svc="$1"; image="$2"
 STATE=/var/lib/tatarbot
 case "$svc" in discord) ;; *) echo "unknown service: $svc (the runtime deploys to Cloud Run)" >&2; exit 2 ;; esac
-[[ "$image" =~ ^${registry_prefix}/tatarbot-$svc:sha-[0-9a-f]{12}$ ]] \
+[[ "$image" =~ ^${registry_prefix}/tatarbot-$svc/tatarbot-$svc:sha-[0-9a-f]{12}$ ]] \
   || { echo "refusing image outside the registry: $image" >&2; exit 2; }
 [ -f "/etc/systemd/system/tatarbot-$svc.service" ] \
   || { echo "tatarbot-$svc is disabled in Terraform ($${svc}_enabled = false)" >&2; exit 2; }

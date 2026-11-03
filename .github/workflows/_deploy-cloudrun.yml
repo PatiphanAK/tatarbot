@@ -87,7 +87,7 @@ jobs:
           git merge-base --is-ancestor "$sha" origin/main \
             || { echo "::error::$sha is not on main; only reviewed commits are deployed."; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "image=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$REPOSITORY:sha-${sha::12}" >> "$GITHUB_OUTPUT"
+          echo "image=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$REPOSITORY/$REPOSITORY:sha-${sha::12}" >> "$GITHUB_OUTPUT"
 
       - uses: google-github-actions/auth@v3
         with:
