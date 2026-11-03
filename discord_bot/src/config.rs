@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use reqwest::Url;
 
+use crate::application::use_cases::ChatLimits;
 use crate::domain::music::StationList;
 use crate::error::AppError;
 
@@ -17,6 +18,8 @@ pub struct Config {
     /// The server library; `None` unless both DATABASE_URL and
     /// MUSIC_S3_BUCKET are set.
     pub library: Option<LibraryConfig>,
+    /// Chat admission control (OWASP API4): rate limits and concurrency.
+    pub chat_limits: ChatLimits,
 }
 
 #[derive(Clone)]
@@ -208,6 +211,7 @@ impl Config {
             .unwrap_or(50);
 
         Ok(Self {
+            chat_limits: chat_limits_from_env()?,
             library: LibraryConfig::from_env()?,
             music: MusicConfig {
                 stations,
@@ -222,6 +226,34 @@ impl Config {
             },
         })
     }
+}
+
+/// `CHAT_*` limits; every value is optional with a conservative default.
+fn chat_limits_from_env() -> Result<ChatLimits, AppError> {
+    let d = ChatLimits::default();
+    let limits = ChatLimits {
+        user_per_minute: parse_range("CHAT_USER_PER_MINUTE", 1..=600, d.user_per_minute as u64)?
+            as f64,
+        user_burst: parse_range("CHAT_USER_BURST", 1..=100, d.user_burst as u64)? as f64,
+        guild_per_minute: parse_range("CHAT_GUILD_PER_MINUTE", 1..=6000, d.guild_per_minute as u64)?
+            as f64,
+        guild_burst: parse_range("CHAT_GUILD_BURST", 1..=1000, d.guild_burst as u64)? as f64,
+        max_concurrent: parse_range("CHAT_MAX_CONCURRENT", 1..=64, d.max_concurrent as u64)?
+            as usize,
+        max_queued: parse_range("CHAT_MAX_QUEUED", 0..=1000, d.max_queued as u64)? as usize,
+        queue_timeout: Duration::from_secs(parse_range(
+            "CHAT_QUEUE_TIMEOUT_SECS",
+            1..=120,
+            d.queue_timeout.as_secs(),
+        )?),
+    };
+    if limits.user_burst > limits.guild_burst {
+        return Err(invalid(
+            "CHAT_USER_BURST",
+            "must not exceed CHAT_GUILD_BURST",
+        ));
+    }
+    Ok(limits)
 }
 
 // Manual Debug impls keep secrets out of logs.

@@ -157,3 +157,36 @@ def test_ready_reflects_model(settings, ready, status):
 
     assert response.status_code == status
     assert response.json()["model"] is ready
+
+
+# --- OWASP API8: no API description in production
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"])
+def test_api_docs_are_off_by_default(client, path):
+    assert client.get(path).status_code == 404
+
+
+def test_api_docs_can_be_enabled_for_development(settings, model):
+    import dataclasses
+
+    dev = dataclasses.replace(settings, api_docs_enabled=True)
+    with TestClient(create_app(dev, model=model)) as c:
+        assert c.get("/openapi.json").status_code == 200
+        assert c.get("/docs").status_code == 200
+        assert c.get("/redoc").status_code == 200
+
+
+def test_api_docs_setting_defaults_to_off(monkeypatch):
+    from agent_runtime.config import Settings
+
+    for key, value in {
+        "AGENT_API_KEY": "k",
+        "MODEL_BASE_URL": "http://m.invalid/v1",
+        "MODEL_NAME": "m",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("API_DOCS_ENABLED", raising=False)
+    assert Settings.from_env().api_docs_enabled is False
+    monkeypatch.setenv("API_DOCS_ENABLED", "true")
+    assert Settings.from_env().api_docs_enabled is True

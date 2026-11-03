@@ -48,6 +48,9 @@ bot (`tatarbot-discord`, the default image target) and the ingest worker (`inges
 | `AGENT_API_KEY` | no | – | Sent as `Authorization: Bearer <key>` |
 | `AGENT_ID_TOKEN_FILE` | no | – | File with a Google ID token for a private Cloud Run runtime, sent as `X-Serverless-Authorization: Bearer <token>`; re-read on every request (the GCP host refreshes it) |
 | `AGENT_TIMEOUT_SECS` | no | `120` | Chat request timeout |
+| `CHAT_USER_PER_MINUTE`, `CHAT_USER_BURST` | no | `6`, `3` | Chat turns per member: refill rate per minute, and the burst |
+| `CHAT_GUILD_PER_MINUTE`, `CHAT_GUILD_BURST` | no | `30`, `10` | Chat turns per server, across its members |
+| `CHAT_MAX_CONCURRENT`, `CHAT_MAX_QUEUED`, `CHAT_QUEUE_TIMEOUT_SECS` | no | `4`, `8`, `15` | Turns in flight at once, how many may wait, and for how long |
 | `MUSIC_STATIONS_FILE` | no | built-in `stations.toml` | Radio stations (TOML, 1–25 entries) |
 | `MUSIC_MAX_QUEUE` | no | `50` | Tracks per server, including the one playing (1–500) |
 | `DATABASE_URL` | for the library | – | Postgres (secret). The library is on only with this **and** `MUSIC_S3_BUCKET` |

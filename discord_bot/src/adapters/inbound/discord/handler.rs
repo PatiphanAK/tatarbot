@@ -12,6 +12,7 @@ use futures::FutureExt;
 
 use super::{chat_actions, convert, library, music, presenter, respond};
 use crate::application::ports::{ChatService, LibraryService, MusicService, PlayContext};
+use crate::application::use_cases::Requester;
 use crate::domain::ChatRequest;
 use crate::domain::music::{GuildId, UserId as MusicUserId};
 
@@ -186,6 +187,27 @@ async fn respond(
     library: Option<&dyn LibraryService>,
     pending: &chat_actions::PendingReports,
 ) {
+    // Admission first (OWASP API4): a refused message costs no model call, no web search, no
+    // database query and no typing indicator. Only the first refusal in a while is answered.
+    let requester = Requester {
+        user: MusicUserId(msg.author.id.get()),
+        guild: msg.guild_id.map(|g| GuildId(g.get())),
+    };
+    let permit = match chat.admit(requester).await {
+        Ok(permit) => permit,
+        Err(limited) => {
+            if limited.notify() {
+                let out = CreateMessage::new()
+                    .content(presenter::chat_limited(&limited))
+                    .allowed_mentions(CreateAllowedMentions::new());
+                if let Err(err) = msg.channel_id.send_message(&ctx.http, out).await {
+                    tracing::warn!(channel = %msg.channel_id, error = %err, "failed to send message");
+                }
+            }
+            return;
+        }
+    };
+
     let text = convert::strip_bot_mention(&msg.content, bot_id);
     let conversation_id = convert::conversation_id(msg.guild_id, msg.channel_id, msg.author.id);
     let conversation = conversation_id.as_str().to_owned();
@@ -219,7 +241,7 @@ async fn respond(
                 }
                 None => request,
             };
-            match chat.chat(request).await {
+            match chat.chat(request, permit).await {
                 Ok(response) => {
                     let outcomes = match msg.guild_id {
                         Some(guild_id) if !response.actions.is_empty() => {

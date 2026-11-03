@@ -1,12 +1,21 @@
 use async_trait::async_trait;
 
 use crate::application::ports::AgentError;
+use crate::application::use_cases::{ChatLimited, ChatPermit, Requester};
 use crate::domain::{ChatRequest, ChatResponse};
 
 /// Inbound port: the chat capability the core offers to inbound adapters.
 #[async_trait]
 pub trait ChatService: Send + Sync {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ChatError>;
+    /// Rate limits and concurrency (OWASP API4). Cheap and local: call it before doing any
+    /// work for a message, and don't call the agent when it refuses.
+    async fn admit(&self, requester: Requester) -> Result<ChatPermit, ChatLimited>;
+    /// One turn. The permit proves admission and holds a concurrency slot until the turn ends.
+    async fn chat(
+        &self,
+        request: ChatRequest,
+        permit: ChatPermit,
+    ) -> Result<ChatResponse, ChatError>;
 }
 
 /// Errors surfaced to inbound adapters. Adapters decide how to present them.

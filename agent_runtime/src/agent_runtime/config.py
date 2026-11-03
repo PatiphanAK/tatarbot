@@ -37,6 +37,9 @@ class Settings:
     model_enable_thinking: bool | None = False
     system_prompt: str = field(default_factory=default_system_prompt)
     guardrails_enabled: bool = True
+    # OWASP API8: FastAPI's /docs, /redoc and /openapi.json are off unless explicitly
+    # enabled (local development); production never exposes the API description.
+    api_docs_enabled: bool = False
     # Web search is enabled when a Tavily key is set.
     tavily_api_key: str | None = field(default=None, repr=False)
     search_max_searches: int = 3
@@ -185,6 +188,7 @@ class Settings:
             model_enable_thinking=_parse("MODEL_ENABLE_THINKING", _bool, False),
             system_prompt=_system_prompt(),
             guardrails_enabled=_parse("GUARDRAILS_ENABLED", _bool, True),
+            api_docs_enabled=_parse("API_DOCS_ENABLED", _bool, False),
             tavily_api_key=_optional("TAVILY_API_KEY"),
             search_max_searches=_parse("SEARCH_MAX_SEARCHES", int, 3),
             search_max_results=_parse("SEARCH_MAX_RESULTS", int, 5),

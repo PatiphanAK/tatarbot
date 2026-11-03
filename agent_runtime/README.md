@@ -203,6 +203,7 @@ are never returned to the caller.
 | `TURN_TIMEOUT_SECONDS` | no | `110` | Whole turn; keep below the bot's timeout |
 | `SYSTEM_PROMPT`, `SYSTEM_PROMPT_FILE` | no | `prompts/system.md` | Override the system prompt |
 | `GUARDRAILS_ENABLED` | no | `true` | Input/output guardrails |
+| `API_DOCS_ENABLED` | no | `false` | Serve `/docs`, `/redoc` and `/openapi.json` (OWASP API8: never in production; `make dev` enables them locally) |
 | `MAX_HISTORY_MESSAGES`, `MAX_CONVERSATIONS` | no | `20`, `10000` | History window and memory bound (`MAX_CONVERSATIONS`: memory store only) |
 | `CONVERSATION_STORE` | no | `memory` | `memory` (lost on restart) or `postgres` (`runtime.conversations`; needs `DATABASE_URL` and `make migrate-runtime`) |
 | `CONVERSATION_RETENTION_DAYS` | no | `30` | Postgres history: conversations idle longer are deleted (swept at most hourly, after a write) |
