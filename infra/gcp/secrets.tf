@@ -8,6 +8,10 @@
 
 locals {
   history_in_postgres = var.runtime_history_store == "postgres"
+  database_consumers = concat(
+    var.discord_enabled && var.music_library_enabled ? ["discord"] : [],
+    local.history_in_postgres ? ["runtime"] : [],
+  )
 
   secrets = {
     discord_token = { id = "${var.name}-discord-token", env = "DISCORD_TOKEN", consumers = ["discord"], enabled = var.discord_enabled }
@@ -16,11 +20,13 @@ locals {
     model_api_key = { id = "${var.name}-model-api-key", env = "MODEL_API_KEY", consumers = ["runtime"], enabled = true }
     # The runtime enables web search only when this key is set.
     tavily_api_key = { id = "${var.name}-tavily-api-key", env = "TAVILY_API_KEY", consumers = ["runtime"], enabled = var.web_search_enabled }
-    # Supabase via Supavisor session mode, verified TLS (discord_bot/README.md).
-    database_url = { id = "${var.name}-database-url", env = "DATABASE_URL", consumers = ["discord"], enabled = var.discord_enabled && var.music_library_enabled }
-    # The runtime's history (chat schema). Separate from the bot's so it can use its own
-    # Postgres role.
-    runtime_database_url = { id = "${var.name}-runtime-database-url", env = "DATABASE_URL", consumers = ["runtime"], enabled = local.history_in_postgres }
+    # One Supabase database (Supavisor session mode, port 5432, verified TLS) for every
+    # workload, each in its own schema: the bot's music library, the runtime's knowledge
+    # base (rag) and its state such as history (runtime).
+    database_url = { id = "${var.name}-database-url", env = "DATABASE_URL", consumers = local.database_consumers, enabled = length(local.database_consumers) > 0 }
+    # Optional: point the runtime schema at another connection string (e.g. a role limited
+    # to that schema). Without it, the runtime uses DATABASE_URL.
+    runtime_database_url = { id = "${var.name}-runtime-database-url", env = "RUNTIME_DATABASE_URL", consumers = ["runtime"], enabled = local.history_in_postgres && var.runtime_database_url_override }
     # HMAC key of the music service account: the bot's S3 SDK talks to GCS's XML API.
     music_hmac_access_id = { id = "${var.name}-music-hmac-access-id", env = "AWS_ACCESS_KEY_ID", consumers = ["discord"], enabled = var.discord_enabled && var.music_library_enabled }
     music_hmac_secret    = { id = "${var.name}-music-hmac-secret", env = "AWS_SECRET_ACCESS_KEY", consumers = ["discord"], enabled = var.discord_enabled && var.music_library_enabled }

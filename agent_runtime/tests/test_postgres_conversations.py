@@ -77,7 +77,7 @@ async def test_expired_conversations_are_swept(store, database):
     await store.append("old", [msg("x")])
     with psycopg.connect(database, autocommit=True) as conn:
         conn.execute(
-            "UPDATE chat.conversations SET updated_at = now() - interval '31 days'"
+            "UPDATE runtime.conversations SET updated_at = now() - interval '31 days'"
             " WHERE conversation_id = 'old'"
         )
     store._last_sweep = 0.0
@@ -94,7 +94,7 @@ async def test_database_outage_degrades_to_no_history(database):
     store = PostgresConversationStore(pool)
     await store.append("c", [msg("1")])
     with psycopg.connect(database, autocommit=True) as conn:
-        conn.execute("ALTER TABLE chat.conversations RENAME TO conversations_gone")
+        conn.execute("ALTER TABLE runtime.conversations RENAME TO conversations_gone")
     try:
         assert await store.load("c") == []
         await store.append("c", [msg("2")])  # dropped with a warning, no exception
@@ -151,3 +151,81 @@ def test_history_survives_a_cold_start(database):
         assert turn(second, "second").status_code == 200
     seen = [m.content for m in model.requests[0].messages[1:]]
     assert seen == ["first", "reply to: first", "second"]
+
+
+def test_runtime_database_url_overrides_only_history(monkeypatch):
+    from agent_runtime.config import Settings
+
+    s = settings_with(conversation_store="postgres", database_url="postgres://main")
+    assert s.conversation_database_url == "postgres://main"
+    s = settings_with(conversation_store="postgres", runtime_database_url="postgres://rt")
+    assert s.conversation_database_url == "postgres://rt"
+    for key, value in {
+        "AGENT_API_KEY": "k",
+        "MODEL_BASE_URL": "http://m.invalid/v1",
+        "MODEL_NAME": "m",
+        "CONVERSATION_STORE": "postgres",
+        "DATABASE_URL": "postgres://main",
+        "RUNTIME_DATABASE_URL": "",
+    }.items():
+        monkeypatch.setenv(key, value)
+    s = Settings.from_env()
+    assert s.runtime_database_url is None
+    assert s.conversation_database_url == "postgres://main"
+    assert "postgres://" not in repr(s)
+
+
+@db
+def test_rag_and_history_share_one_database_url(database, tmp_path, monkeypatch):
+    """One DATABASE_URL, one pool: documents go to rag.*, history to runtime.*."""
+    import time
+
+    from conftest import FakeModel
+    from fastapi.testclient import TestClient
+
+    import agent_runtime.main as main_module
+    from agent_runtime.main import create_app
+
+    created = []
+    real_create_pool = main_module.create_pool
+
+    def recording_create_pool(url, size):
+        created.append(url)
+        return real_create_pool(url, size)
+
+    monkeypatch.setattr(main_module, "create_pool", recording_create_pool)
+    migrate(database)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "faq.md").write_text("# FAQ\n\n## Uploads\n\nUploads are limited to 25 MB per file.\n")
+    s = settings_with(
+        conversation_store="postgres",
+        rag_store="postgres",
+        rag_docs_dir=str(docs),
+        rag_min_score=0.1,
+        embedding_provider="hash",
+        embedding_dimensions=1024,
+        database_url=database,
+    )
+    auth = {"Authorization": "Bearer k"}
+    model = FakeModel(replies=["25 MB."])
+    with TestClient(create_app(s, model=model)) as client:
+        for _ in range(100):
+            status = client.get("/v1/knowledge", headers=auth).json()
+            if status["chunks"]:
+                break
+            time.sleep(0.05)
+        assert status["chunks"] == 1
+        body = {"message": "upload size limit?", "conversation_id": "g:1"}
+        assert client.post("/v1/chat", json=body, headers=auth).status_code == 200
+    # Retrieval (vector + keyword search over rag.chunks) reached the prompt...
+    assert "limited to 25 MB" in model.requests[0].messages[0].content
+    with psycopg.connect(database) as conn:
+        # ...the chunk is stored in rag.*, the conversation in runtime.*...
+        assert conn.execute("SELECT count(*) FROM rag.chunks").fetchone()[0] == 1
+        messages = conn.execute(
+            "SELECT messages FROM runtime.conversations WHERE conversation_id = 'g:1'"
+        ).fetchone()[0]
+        assert [m["content"] for m in messages] == ["upload size limit?", "25 MB."]
+        # ...over a single pool.
+    assert created == [database]

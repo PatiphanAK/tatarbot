@@ -42,7 +42,7 @@ flowchart LR
     B -- "HTTPS + X-Serverless-Authorization<br/>(ID token, run.invoker) + bearer key" --> R
     B <-- "WSS + UDP voice" --> D
     B -- "library (TLS verify-full)" --> SB
-    R -- "history (chat schema)" --> SB
+    R -- "history (runtime schema)" --> SB
     R -- "HTTPS + key" --> RP
     B -- "S3 XML API + HMAC key" --> GCS[(GCS music bucket)]
     SM[(Secret Manager)] -. "bot's secrets" .-> H
@@ -137,7 +137,7 @@ at any time. What the runtime keeps in process, and what happens to it:
 
 | State | Before | Now | After scale-to-zero |
 |---|---|---|---|
-| Conversation history | in-memory LRU, unbounded in time | Postgres `chat.conversations` (`CONVERSATION_STORE=postgres`, new migration `20261103000000`) | **kept**. Tested by starting two app instances in a row (`test_history_survives_a_cold_start`) |
+| Conversation history | in-memory LRU, unbounded in time | Postgres `runtime.conversations` (`CONVERSATION_STORE=postgres`, migration `runtime/20261103000000`) | **kept**. Tested by starting two app instances in a row (`test_history_survives_a_cold_start`) |
 | Pending music-action results (tool messages) | in history | in history | kept |
 | Per-conversation turn lock | in process | in process + a row lock on every write | not needed across instances while max = 1 |
 | Knowledge base (RAG) | off in production | off | would re-embed `RAG_DOCS_DIR` on every cold start, and indexing runs in the background, which request-based billing throttles. Keep it off on Cloud Run, or use `RAG_STORE=postgres` |
@@ -186,14 +186,16 @@ runtime image with its own service agent, which reads same-project repositories 
   |---|---|---|---|
   | `tatarbot-discord-token` | `DISCORD_TOKEN` | bot | always |
   | `tatarbot-agent-api-key` | `AGENT_API_KEY` | bot + runtime | always |
-  | `tatarbot-database-url` | `DATABASE_URL` | bot | `music_library_enabled` |
+  | `tatarbot-database-url` | `DATABASE_URL` | bot + runtime | bot: `music_library_enabled`; runtime: `runtime_history_store = "postgres"` |
   | `tatarbot-music-hmac-access-id` / `-secret` | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | bot | `music_library_enabled` |
   | `tatarbot-model-api-key` | `MODEL_API_KEY` | runtime | always |
   | `tatarbot-tavily-api-key` | `TAVILY_API_KEY` | runtime | `web_search_enabled` |
-  | `tatarbot-runtime-database-url` | `DATABASE_URL` | runtime | `runtime_history_store = "postgres"` |
+  | `tatarbot-runtime-database-url` | `RUNTIME_DATABASE_URL` | runtime | optional: `runtime_database_url_override = true` |
 
-  The runtime's database URL is separate from the bot's, so it can move to its own Postgres
-  role (only the `chat` and `rag` schemas) without touching the bot. Both images ship
+  One Supabase database and one connection string (Supavisor session pooler, port 5432)
+  for everything, one schema per workload: `public` (bot library), `rag` (knowledge base,
+  pgvector) and `runtime` (history). The optional override lets the `runtime` schema move
+  to its own Postgres role later without touching the bot. Both images ship
   Supabase's CA at `/etc/tatarbot/supabase-root-2021.crt` for `sslmode=verify-full`.
 * **Music bucket through the S3 API.** The bot's `aws-sdk-s3` code is unchanged:
   `MUSIC_S3_ENDPOINT=https://storage.googleapis.com`, `AWS_REGION=auto`, flexible checksums
@@ -284,7 +286,6 @@ linked to the project** (`gcloud billing projects link tatarbot --billing-accoun
    printf %s "$TAVILY_API_KEY" | gcloud secrets versions add tatarbot-tavily-api-key --data-file=-
    # Supabase, session mode, verify-full (the CA path exists in both images):
    printf %s "$DATABASE_URL" | gcloud secrets versions add tatarbot-database-url --data-file=-
-   printf %s "$DATABASE_URL" | gcloud secrets versions add tatarbot-runtime-database-url --data-file=-
    # HMAC key for the music service account (the secret is shown once):
    gcloud storage hmac create "tatarbot-music@tatarbot.iam.gserviceaccount.com" --format=json > /dev/shm/hmac.json
    python3 -c 'import json; print(json.load(open("/dev/shm/hmac.json"))["metadata"]["accessId"], end="")' \
@@ -294,10 +295,18 @@ linked to the project** (`gcloud billing projects link tatarbot --billing-accoun
    shred -u /dev/shm/hmac.json
    ```
 
-4. **Migrate the database once** (adds the `chat` schema; also the `rag` schema and the
-   `vector`/`pg_trgm` extensions, which Supabase allows):
-   `DATABASE_URL="$DATABASE_URL" make -C agent_runtime migrate`. The bot's own migrations
-   run when it starts.
+4. **Migrate the database once.** Two independent groups in the one Supabase database:
+   `runtime` (schema `runtime`, history; needed now) and `rag` (schema `rag` with the
+   `vector`/`pg_trgm` extensions, which Supabase allows; needed only for a Postgres
+   knowledge base). Call the runner directly, not `make migrate`, which would load
+   `agent_runtime/.env` over the production URL:
+
+   ```sh
+   cd agent_runtime
+   DATABASE_URL="$DATABASE_URL" uv run python -m agent_runtime.db.migrate runtime  # or: rag, or both
+   ```
+
+   The bot's own migrations (schema `public`) run when it starts.
 
 5. **Apply phase 2:** `terraform apply`. The runtime starts on Google's sample image, and
    the VM boots and starts nothing (no bot image yet).
@@ -354,7 +363,7 @@ linked to the project** (`gcloud billing projects link tatarbot --billing-accoun
 | Images | Artifact Registry (newest 3) | yes | rebuild from git |
 | Secrets | Secret Manager | yes | keep your own copy |
 | Library metadata | Supabase (`public.library_tracks`) | yes | Supabase backups; `pg_dump` |
-| Conversation history | Supabase (`chat.conversations`, 30-day retention) | yes | same |
+| Conversation history | Supabase (`runtime.conversations`, 30-day retention) | yes | same |
 | Library audio | GCS (no versioning, soft delete off) | yes | none: a delete is final, by design |
 | Bot image reference | VM disk (`/var/lib/tatarbot`) | not VM replacement: redeploy | the deploy workflow |
 | Logs | Cloud Logging, 30 days | yes | none |

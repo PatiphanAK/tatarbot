@@ -8,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from psycopg_pool import AsyncConnectionPool
 
 from agent_runtime.adapters.inbound.http_api import build_router, install_error_handlers
 from agent_runtime.adapters.outbound.embedding_cache import CachedEmbeddings
@@ -66,17 +67,20 @@ def create_app(
         search = TavilySearch(
             settings.tavily_api_key, timeout_seconds=settings.search_timeout_seconds
         )
-    # One pool for everything that uses Postgres (history, knowledge store).
-    pool = (
-        create_pool(settings.database_url, settings.database_pool_size)
-        if settings.database_needed
-        else None
-    )
+    # One pool per database URL: the knowledge store (schema rag) and history (schema
+    # runtime) share it unless RUNTIME_DATABASE_URL points history elsewhere.
+    pools: dict[str, AsyncConnectionPool] = {}
+
+    def pool_for(url: str) -> AsyncConnectionPool:
+        if url not in pools:
+            pools[url] = create_pool(url, settings.database_pool_size)
+        return pools[url]
+
     if store is None:
         history_size = max(settings.max_history_messages * 2, 2)
         if settings.conversation_store == "postgres":
             store = PostgresConversationStore(
-                pool,
+                pool_for(settings.conversation_database_url),
                 max_messages_per_conversation=history_size,
                 retention_days=settings.conversation_retention_days,
             )
@@ -93,6 +97,7 @@ def create_app(
         if settings.rag_cache_file:
             embedder = CachedEmbeddings(embedder, settings.rag_cache_file)
         if settings.rag_store == "postgres":
+            pool = pool_for(settings.database_url)
             vectors = PostgresVectorStore(
                 pool,
                 embedder.identity,
@@ -146,7 +151,7 @@ def create_app(
             "on" if uploads else "off",
             settings.conversation_store,
         )
-        if pool:
+        for pool in pools.values():
             # Does not wait for a connection: a database outage leaves the runtime serving
             # without knowledge or history, like an embedding outage.
             await pool.open(wait=False)
@@ -161,7 +166,7 @@ def create_app(
             await search.aclose()
         if embedder:
             await embedder.aclose()
-        if pool:
+        for pool in pools.values():
             await pool.close()
 
     app = FastAPI(title="TatarBot Agent Runtime", version="0.1.0", lifespan=lifespan)

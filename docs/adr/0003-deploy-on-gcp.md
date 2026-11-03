@@ -38,8 +38,9 @@ runtime's load is bursty and mostly idle, which suits a scale-to-zero service be
    sends it as `X-Serverless-Authorization`, which leaves `Authorization` for the API key.
    The bot container stays blocked from the metadata server, so it never holds a
    service-account credential.
-5. **Conversation history in Postgres** (`CONVERSATION_STORE=postgres`, schema `chat`,
-   30-day retention) behind the existing `ConversationStore` port, so scale-to-zero and
+5. **Conversation history in Postgres** (`CONVERSATION_STORE=postgres`, schema `runtime`,
+   30-day retention, in the same Supabase database and `DATABASE_URL` as the knowledge
+   base in schema `rag` and the bot's library) behind the existing `ConversationStore` port, so scale-to-zero and
    deploys lose nothing. A database outage degrades to no history instead of failing chat.
 6. **Unchanged from the first GCP design:**
    - Secret Manager, with per-secret access for each consumer;
@@ -78,8 +79,8 @@ runtime's load is bursty and mostly idle, which suits a scale-to-zero service be
 * The first message after about 15 idle minutes pays a cold start. That's 1.3 s locally,
   estimated 2–5 s on Cloud Run, not measured there yet. The bot's 120 s timeout includes a
   15 s margin for it.
-* The runtime needs a database (`tatarbot-runtime-database-url`) and the migrations before
-  the first deploy. Cloud Run needs the secrets to have versions before the service is
+* The runtime shares the bot's database secret (`tatarbot-database-url`) and needs the
+  `runtime` migrations before the first deploy. Cloud Run needs the secrets to have versions before the service is
   created, so `apply` runs in two phases.
 * One more moving part on the VM (the token timer). If it fails, chat stops after about
   50 minutes while music keeps working.

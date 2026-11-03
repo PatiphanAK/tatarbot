@@ -1,4 +1,4 @@
-"""`ConversationStore` in Postgres (`chat.conversations`, migration 20261103000000).
+"""`ConversationStore` in Postgres (`runtime.conversations`, migration 20261103000000).
 
 History survives runtime restarts, deploys and Cloud Run scaling to zero. Each
 conversation is one row holding its trimmed message list as JSONB; every change runs in
@@ -68,7 +68,7 @@ class PostgresConversationStore(ConversationStore):
                 await conn.execute(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'")
                 row = await (
                     await conn.execute(
-                        "SELECT messages FROM chat.conversations WHERE conversation_id = %s",
+                        "SELECT messages FROM runtime.conversations WHERE conversation_id = %s",
                         (conversation_id,),
                     )
                 ).fetchone()
@@ -109,7 +109,7 @@ class PostgresConversationStore(ConversationStore):
                 await conn.execute(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'")
                 row = await (
                     await conn.execute(
-                        "SELECT messages FROM chat.conversations"
+                        "SELECT messages FROM runtime.conversations"
                         " WHERE conversation_id = %s FOR UPDATE",
                         (conversation_id,),
                     )
@@ -119,7 +119,7 @@ class PostgresConversationStore(ConversationStore):
                 if updated is None:
                     return False
                 await conn.execute(
-                    "INSERT INTO chat.conversations (conversation_id, messages, updated_at)"
+                    "INSERT INTO runtime.conversations (conversation_id, messages, updated_at)"
                     " VALUES (%s, %s, now())"
                     " ON CONFLICT (conversation_id) DO UPDATE"
                     " SET messages = EXCLUDED.messages, updated_at = now()",
@@ -144,7 +144,7 @@ class PostgresConversationStore(ConversationStore):
             async with self._pool.connection() as conn, conn.transaction():
                 await conn.execute(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'")
                 cur = await conn.execute(
-                    "DELETE FROM chat.conversations"
+                    "DELETE FROM runtime.conversations"
                     " WHERE updated_at < now() - make_interval(days => %s)",
                     (self._retention_days,),
                 )

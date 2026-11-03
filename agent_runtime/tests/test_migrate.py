@@ -7,7 +7,15 @@ import psycopg
 import pytest
 from conftest import db
 
-from agent_runtime.db.migrate import Migration, MigrationError, load_migrations, migrate
+from agent_runtime.db.migrate import (
+    GROUPS,
+    Migration,
+    MigrationError,
+    conninfo_for,
+    load_migrations,
+    main,
+    migrate,
+)
 
 
 def test_packaged_migrations_are_ordered_and_named():
@@ -16,12 +24,82 @@ def test_packaged_migrations_are_ordered_and_named():
     versions = [m.version for m in migrations]
     assert versions == sorted(set(versions))
     assert migrations[0].description == "rag"
+    assert {m.group for m in migrations} == set(GROUPS)
+
+
+def test_groups_hold_their_own_schema_only():
+    """RAG migrations touch only `rag`; runtime migrations only `runtime`, with no vectors."""
+    for m in load_migrations():
+        sql = "\n".join(line.split("--")[0] for line in m.sql.lower().splitlines())
+        if m.group == "rag":
+            assert "runtime." not in sql
+        else:
+            assert "rag." not in sql
+            assert "vector" not in sql
+
+
+def test_runtime_url_falls_back_to_database_url():
+    env = {"DATABASE_URL": "postgres://main"}
+    assert conninfo_for("rag", env) == "postgres://main"
+    assert conninfo_for("runtime", env) == "postgres://main"
+    env["RUNTIME_DATABASE_URL"] = "postgres://runtime"
+    assert conninfo_for("runtime", env) == "postgres://runtime"
+    assert conninfo_for("rag", env) == "postgres://main"
+    assert conninfo_for("runtime", {"RUNTIME_DATABASE_URL": " "}) is None
+
+
+def test_unknown_group_is_rejected():
+    assert main(["chat"]) == 2
 
 
 @db
 def test_applies_once(database):
     assert [m.version for m in migrate(database)] == [m.version for m in load_migrations()]
     assert migrate(database) == []
+
+
+@db
+@pytest.mark.parametrize("first", GROUPS)
+def test_groups_apply_independently_in_any_order(database, first):
+    second = next(g for g in GROUPS if g != first)
+    by_group = {g: [m.version for m in load_migrations() if m.group == g] for g in GROUPS}
+    assert [m.version for m in migrate(database, groups=(first,))] == by_group[first]
+    with psycopg.connect(database) as conn:
+        schemas = {r[0] for r in conn.execute("SELECT nspname FROM pg_namespace")}
+    assert first in schemas and second not in schemas
+    assert [m.version for m in migrate(database, groups=(second,))] == by_group[second]
+    assert migrate(database) == []
+
+
+@db
+def test_runtime_schema_is_relational(database):
+    migrate(database, groups=("runtime",))
+    with psycopg.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO runtime.conversations (conversation_id, messages) VALUES ('c', '[]')"
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO runtime.conversations (conversation_id, messages) VALUES ('d', '{}')"
+            )
+    with psycopg.connect(database) as conn:
+        # Neither pgvector nor pg_trgm is needed for the runtime group.
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM pg_extension WHERE extname IN ('vector', 'pg_trgm')"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@db
+def test_main_uses_one_database_for_both_groups(database, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", database)
+    monkeypatch.delenv("RUNTIME_DATABASE_URL", raising=False)
+    assert main([]) == 0
+    with psycopg.connect(database) as conn:
+        assert conn.execute("SELECT to_regclass('rag.chunks')").fetchone()[0] is not None
+        assert conn.execute("SELECT to_regclass('runtime.conversations')").fetchone()[0] is not None
 
 
 @db
@@ -85,17 +163,22 @@ def test_missing_migration_is_an_error(database):
 
 @db
 def test_failed_migration_is_rolled_back(database):
-    broken = Migration(99990101000000, "broken", "CREATE TABLE half (id INT); SELECT 1/0;")
+    broken = Migration(
+        "runtime", 99990101000000, "broken", "CREATE TABLE half (id INT); SELECT 1/0;"
+    )
     with pytest.raises(psycopg.errors.DivisionByZero):
         migrate(database, [broken])
     with psycopg.connect(database) as conn:
         assert conn.execute("SELECT to_regclass('half')").fetchone()[0] is None
-        assert conn.execute("SELECT count(*) FROM _agent_runtime_migrations").fetchone()[0] == 0
+        assert (
+            conn.execute("SELECT count(*) FROM public._agent_runtime_migrations").fetchone()[0] == 0
+        )
 
 
 @db
 def test_ingestion_migration_keeps_existing_rows(database):
     first, *rest = load_migrations()
+    assert first.group == "rag"
     migrate(database, [first])
     with psycopg.connect(database) as conn:
         doc = conn.execute(

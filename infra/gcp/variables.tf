@@ -145,7 +145,7 @@ variable "runtime_request_timeout_seconds" {
 }
 
 variable "runtime_history_store" {
-  description = "postgres: history survives scale-to-zero (needs the runtime-database-url secret and the migrations). memory: lost whenever the instance stops."
+  description = "postgres: history survives scale-to-zero (schema runtime in the shared Supabase database; needs the database-url secret and `migrate runtime`). memory: lost whenever the instance stops."
   type        = string
   default     = "postgres"
 
@@ -153,6 +153,12 @@ variable "runtime_history_store" {
     condition     = contains(["postgres", "memory"], var.runtime_history_store)
     error_message = "runtime_history_store must be postgres or memory."
   }
+}
+
+variable "runtime_database_url_override" {
+  description = "Also create the optional runtime-database-url secret (RUNTIME_DATABASE_URL), so the runtime schema can use its own connection string. Off: the runtime uses database-url."
+  type        = bool
+  default     = false
 }
 
 variable "conversation_retention_days" {

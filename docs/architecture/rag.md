@@ -260,7 +260,7 @@ sequenceDiagram
 
 | Piece | Code |
 |---|---|
-| Schema | `db/migrations/20261101000000_rag_ingestion.sql` (additive; the first migration is untouched) |
+| Schema | `db/migrations/rag/20261101000000_rag_ingestion.sql` (additive; the first migration is untouched) |
 | Use cases | `application/ingestion.py`: `Uploads` (create, list, delete, reprocess), `Ingestor` |
 | Ports | `application/ports.py`: `DocumentRepository`, `ObjectStorage`, `IngestQueue`; `VectorStore.search` gained `text` and `namespaces` |
 | Postgres | `adapters/outbound/postgres_rag.py`: `PostgresVectorStore`, `PostgresDocumentRepository` |

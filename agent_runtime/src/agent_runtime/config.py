@@ -17,7 +17,7 @@ class ConfigError(Exception):
 EMBEDDING_PROVIDERS = ("openai", "hash")
 # RAG_STORE values: in-process memory, or Postgres + pgvector (persistent, uploads).
 RAG_STORES = ("memory", "postgres")
-# CONVERSATION_STORE values: in-process memory (lost on restart), or Postgres (chat schema).
+# CONVERSATION_STORE values: in-process memory (lost on restart), or Postgres (runtime schema).
 CONVERSATION_STORES = ("memory", "postgres")
 # rag.chunks.embedding is vector(1024) (BGE-M3). Another size needs a new migration and a
 # re-embed, never a silent change; the Postgres store also checks the live schema.
@@ -63,7 +63,11 @@ class Settings:
     # Postgres store: trigram similarity a keyword hit needs (it is then kept even below
     # RAG_MIN_SCORE); 1 turns keyword search off.
     rag_keyword_min_score: float = 0.25
+    # One Supabase database for both workloads: the knowledge base (schema `rag`) and
+    # runtime state such as history (schema `runtime`). RUNTIME_DATABASE_URL optionally
+    # points the runtime schema elsewhere (e.g. another role); empty = DATABASE_URL.
     database_url: str | None = field(default=None, repr=False)
+    runtime_database_url: str | None = field(default=None, repr=False)
     database_pool_size: int = 5
     # Uploads (Postgres store only): enabled when a bucket is set. S3 credentials and
     # region come from the standard AWS chain (task role); AWS_ENDPOINT_URL_S3 / _SQS
@@ -99,12 +103,20 @@ class Settings:
     def database_needed(self) -> bool:
         return self.conversation_store == "postgres" or self.rag_store == "postgres"
 
+    @property
+    def conversation_database_url(self) -> str | None:
+        """Where `runtime.conversations` lives: RUNTIME_DATABASE_URL, else DATABASE_URL."""
+        return self.runtime_database_url or self.database_url
+
     def __post_init__(self):
         if self.conversation_store not in CONVERSATION_STORES:
             raise ConfigError(f"CONVERSATION_STORE must be one of {', '.join(CONVERSATION_STORES)}")
         if self.conversation_store == "postgres":
-            if not self.database_url:
-                raise ConfigError("DATABASE_URL is required when CONVERSATION_STORE=postgres")
+            if not self.conversation_database_url:
+                raise ConfigError(
+                    "DATABASE_URL (or RUNTIME_DATABASE_URL) is required when "
+                    "CONVERSATION_STORE=postgres"
+                )
             if self.database_pool_size < 1:
                 raise ConfigError("DATABASE_POOL_SIZE must be at least 1")
             if self.conversation_retention_days < 1:
@@ -193,6 +205,7 @@ class Settings:
             rag_timeout_seconds=_parse("RAG_TIMEOUT_SECONDS", float, 10.0),
             rag_keyword_min_score=_parse("RAG_KEYWORD_MIN_SCORE", float, 0.25),
             database_url=_optional("DATABASE_URL"),
+            runtime_database_url=_optional("RUNTIME_DATABASE_URL"),
             database_pool_size=_parse("DATABASE_POOL_SIZE", int, 5),
             rag_s3_bucket=_optional("RAG_S3_BUCKET"),
             rag_s3_prefix=os.environ.get("RAG_S3_PREFIX", "rag/").strip(),

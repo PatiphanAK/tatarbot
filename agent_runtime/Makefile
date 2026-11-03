@@ -9,7 +9,7 @@ IMAGE    ?= tatarbot-agent-runtime:local
 DEV_DB   ?= postgres://tatarbot:tatarbot-local@127.0.0.1:$${POSTGRES_PORT:-55432}/tatarbot
 
 .DEFAULT_GOAL := help
-.PHONY: help install env run dev test lint fmt check smoke db-up migrate test-db worker image image-run
+.PHONY: help install env run dev test lint fmt check smoke db-up migrate migrate-rag migrate-runtime test-db worker image image-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -47,8 +47,14 @@ check: lint test ## Lint + tests
 db-up: ## Start local Postgres + pgvector (compose)
 	docker compose -f ../compose.yaml up -d --wait postgres
 
-migrate: ## Apply the RAG migrations to DATABASE_URL (from .env)
+migrate: ## Apply the pending migrations of both groups (rag, runtime) from .env
 	@$(LOAD_ENV); uv run python -m agent_runtime.db.migrate
+
+migrate-rag: ## Apply only the knowledge-base migrations (schema rag) to DATABASE_URL
+	@$(LOAD_ENV); uv run python -m agent_runtime.db.migrate rag
+
+migrate-runtime: ## Apply only the runtime-state migrations (schema runtime)
+	@$(LOAD_ENV); uv run python -m agent_runtime.db.migrate runtime
 
 worker: ## Run the upload ingestion worker with .env (SQS -> parse, embed -> Postgres)
 	@$(LOAD_ENV); uv run python -m agent_runtime.worker

@@ -1,22 +1,34 @@
 # Database: schema and data lifecycle
 
-Both services can share one Postgres database: Supabase in production, the `postgres`
-service of [`compose.yaml`](../../compose.yaml) locally. Each service owns its tables,
-applies its own migrations, and keeps its own migration history, so neither can break the
-other's.
+Everything lives in one Postgres database, reached with one connection string
+(`DATABASE_URL`): Supabase in production (Supavisor session pooler, port 5432, verified TLS),
+the `postgres` service of [`compose.yaml`](../../compose.yaml) locally. Each workload has its
+own schema and its own migrations, and every query names the schema of its tables, so
+none depends on `search_path` to find them:
+
+* `rag`: the knowledge base, a vector workload (pgvector, HNSW, hybrid search).
+* `runtime`: the runtime's state such as conversation history, plain relational tables.
+* `public`: the bot's music library and both migration history tables.
 
 | Owner | Schema | Tables | Migrations | Applied by | History table |
 |---|---|---|---|---|---|
 | `discord_bot` | `public` | `library_tracks` | [`discord_bot/migrations/`](../../discord_bot/migrations/) | the bot, on every (re)connect (sqlx) | `_sqlx_migrations` |
-| `agent_runtime` | `rag` | `documents`, `chunks`, `ingestion_jobs` | [`agent_runtime/src/agent_runtime/db/migrations/`](../../agent_runtime/src/agent_runtime/db/migrations/) | an operator: `make -C agent_runtime migrate` (never on startup) | `_agent_runtime_migrations` |
-| `agent_runtime` | `chat` | `conversations` | same runner (`20261103000000_conversations.sql`) | same | same |
+| `agent_runtime` | `rag` | `documents`, `chunks`, `ingestion_jobs` | [`…/db/migrations/rag/`](../../agent_runtime/src/agent_runtime/db/migrations/rag/) | an operator: `make -C agent_runtime migrate-rag` (never on startup) | `public._agent_runtime_migrations` |
+| `agent_runtime` | `runtime` | `conversations` | [`…/db/migrations/runtime/`](../../agent_runtime/src/agent_runtime/db/migrations/runtime/) | an operator: `make -C agent_runtime migrate-runtime` | same |
+
+The two runtime groups are independent: either can be applied alone, in any order
+(`make migrate` applies both). The `runtime` group needs no extension. `RUNTIME_DATABASE_URL`
+can point the `runtime` schema at another connection string, such as a role limited to
+it; when it is empty, both use `DATABASE_URL`.
 
 Both are append-only: an applied migration file is never edited (each runner checks a
 checksum and refuses), and a schema change is a new file. The SQL files are the source of
 truth for column types and constraints; this page explains how the data moves.
 
-Extensions: `pg_trgm` (both services), `vector` (runtime). Both are trusted extensions on
-Supabase.
+Extensions: `pg_trgm` (the bot, `rag`), `vector` (`rag`). Both are trusted extensions on
+Supabase, which installs them into its `extensions` schema. Their types and operators
+(`vector`, `<=>`, `gin_trgm_ops`) are found through the role's `search_path`, which on
+Supabase includes `extensions`; table names are always schema-qualified.
 
 ## Music library (`discord_bot`)
 
@@ -151,10 +163,10 @@ don't interleave.
   compares with the live column type on first use, and every vector is checked on write and
   query.
 
-## Conversation history (`agent_runtime`, schema `chat`)
+## Conversation history (`agent_runtime`, schema `runtime`)
 
 Used with `CONVERSATION_STORE=postgres` (the GCP deployment, where the runtime scales to
-zero on Cloud Run). `chat.conversations` has one row per `conversation_id` (the bot's
+zero on Cloud Run). `runtime.conversations` has one row per `conversation_id` (the bot's
 `discord:<guild|dm>:<channel>:<user>`), with `messages`, a JSONB array of the runtime's
 `ChatMessage`s (role, content, tool calls, tool call id) oldest first, and `updated_at`.
 
