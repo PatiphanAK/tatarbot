@@ -169,7 +169,16 @@ def create_app(
         for pool in pools.values():
             await pool.close()
 
-    app = FastAPI(title="TatarBot Agent Runtime", version="0.1.0", lifespan=lifespan)
+    docs = settings.api_docs_enabled
+    app = FastAPI(
+        title="TatarBot Agent Runtime",
+        version="0.1.0",
+        lifespan=lifespan,
+        # OWASP API8: no unauthenticated API description in production.
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
+    )
     install_error_handlers(app)
     app.include_router(
         build_router(chat_service, model, settings.agent_api_key, knowledge, uploads)

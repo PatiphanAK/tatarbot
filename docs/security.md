@@ -98,3 +98,55 @@ Both images run as non-root users with no secrets baked in. The bot's image is d
 token a read-only mount). The
 runtime's is `python:3.12-slim` with a virtualenv.
 
+
+## Chat cost controls (OWASP API4)
+
+Every chat turn costs model tokens and up to `SEARCH_MAX_SEARCHES` web searches, so the bot
+admits a turn *before* doing any work for it (`application/use_cases/chat_limits.rs`):
+
+| Limit | Default | Setting |
+|---|---|---|
+| Per member | 3 at once, then 6 per minute | `CHAT_USER_BURST`, `CHAT_USER_PER_MINUTE` |
+| Per server (all members) | 10 at once, then 30 per minute | `CHAT_GUILD_BURST`, `CHAT_GUILD_PER_MINUTE` |
+| In flight / waiting / max wait | 4 / 8 / 15 s | `CHAT_MAX_CONCURRENT`, `CHAT_MAX_QUEUED`, `CHAT_QUEUE_TIMEOUT_SECS` |
+
+* **The agent can't be called without admission.** `ChatService::chat` takes the
+  `ChatPermit` that `admit` returns. A refused message costs no model call, no search, no
+  library query and no typing indicator.
+* **Busy refusals are refunded,** so they don't use up the member's or server's budget.
+* **At most one "slow down" reply per member per 30 s,** so the limiter can't be used to
+  make the bot spam a channel.
+* **Behind the bot:**
+  * the runtime's Cloud Run limits (1 instance, concurrency 10, `TURN_TIMEOUT_SECONDS`);
+  * `SEARCH_MAX_SEARCHES` per turn;
+  * the project budget alerts.
+
+Worst case with the defaults: one busy server can make at most about 30 turns a minute,
+and all servers together at most 4 at a time. Lower `CHAT_GUILD_PER_MINUTE` or
+`CHAT_MAX_CONCURRENT` to cap model spend further.
+
+## OWASP API Security Top 10 (2023)
+
+Reviewed 2026-11-03 for the agent runtime, the ingest worker and the bot's outbound calls.
+Code-level controls are tested. The GCP-level ones (ingress, IAM) are verified after
+deployment (`infra/gcp/README.md`).
+
+| Risk | Controls | Tests |
+|---|---|---|
+| API1 Object-level authorization | Library rows scoped by guild in every query. Ingest jobs scoped to their producer. RAG namespaces derived on the server from the conversation id, which the bot builds from Discord ids, never from message text. The bot never calls the runtime's knowledge or admin routes. | `pg_tracks_are_isolated_per_guild`, `only_the_uploader_or_a_manager_deletes`, ingest `pg_cancelling…` (other producer: not found) |
+| API2 Authentication | Runtime: Cloud Run IAM plus an API key compared in constant time. Ingest: Google ID tokens verified in the app (signature, `aud`, `iss`, `exp`, `email_verified`); stripped signatures rejected. No long-lived cloud keys except the HMAC key until ADR 0004 phase 4. | `ingest-core` `auth` and `tests/http.rs` |
+| API3 Property-level authorization | Typed request bodies with length limits. The job API never receives Discord data or interaction tokens. | `pg_upload_submits_with_the_id_token_and_a_generic_contract` |
+| API4 Resource consumption | Chat admission control (above). Upload limits (25 MiB, per-member and per-server ingest limits, guild quota, ffmpeg rlimits). Max instances and concurrency on every Cloud Run service. Budget brake. | `chat_limits` tests, `spam_reaches_the_agent_only_for_admitted_turns`, ingest admission tests |
+| API5 Function-level authorization | Ingest `/internal/*` only for the tasks invoker; `/v1/*` only for registered producers. | `tests/http.rs` |
+| API6 Sensitive business flows | Upload and chat limits, quotas, the kill switch. | as API4 |
+| API7 SSRF | Bot links: public-only DNS at connect time (rebinding-safe), IP literals checked on the URL and every redirect, at most 5 redirects, http(s) only. Chat can never play a link. Ingest: exact HTTPS host allowlist re-checked on every redirect, public-only DNS, allowlisted IP literals must be public. ffmpeg opens local files only. | `audio_http` (obfuscated literals, rebinding, redirects), `fetch` (parser tricks, metadata redirect, private DNS), `links_are_never_played_from_chat` |
+| API8 Security misconfiguration | Runtime `/docs`, `/redoc` and `/openapi.json` off unless `API_DOCS_ENABLED=true` (only `make dev`). Internal ingress, deny-all firewall, distroless non-root read-only containers. | `test_api_docs_are_off_by_default` |
+| API9 Inventory | All routes in code, versioned (`/v1`), documented. | – |
+| API10 Unsafe consumption of APIs | Model output: guardrails, and actions limited to a fixed set (at most 2, run as the requesting member under the music rules). Untrusted text (search results, knowledge, member-uploaded titles, stream titles) is flattened, bounded and labelled as data, not instructions. Tool arguments validated against the offered stations and lengths. | `test_library_titles_are_quoted_and_marked_as_data`, `test_arguments_are_validated`, `at_most_two_actions_run` |
+
+**Residual risks:**
+* Prompt injection can't be fully prevented. Its effect is limited to the actions above,
+  which the requesting member could take anyway.
+* No dependency scanning in CI yet.
+* No alerting on authentication-failure spikes yet.
+* The HMAC key remains until ADR 0004 phase 4.

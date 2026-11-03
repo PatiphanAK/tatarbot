@@ -28,8 +28,8 @@ env: ## Create .env from .env.example with a generated AGENT_API_KEY
 run: ## Run the runtime with .env
 	@$(LOAD_ENV); $(UVICORN) --host $${HOST:-127.0.0.1} --port $${PORT:-8080}
 
-dev: ## Run with auto-reload
-	@$(LOAD_ENV); $(UVICORN) --reload --host $${HOST:-127.0.0.1} --port $${PORT:-8080}
+dev: ## Run with auto-reload (API docs on at /docs, local only)
+	@$(LOAD_ENV); API_DOCS_ENABLED=$${API_DOCS_ENABLED:-true} $(UVICORN) --reload --host $${HOST:-127.0.0.1} --port $${PORT:-8080}
 
 test: ## Run tests
 	uv run pytest -q
