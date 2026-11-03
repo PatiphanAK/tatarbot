@@ -11,7 +11,10 @@ locals {
   database_consumers = concat(
     var.discord_enabled && var.music_library_enabled ? ["discord"] : [],
     local.history_in_postgres ? ["runtime"] : [],
+    var.ingest_enabled ? ["ingest"] : [],
   )
+  # HMAC key for the bot's S3 API access; removed in ADR 0004 phase 4 (music_hmac_enabled).
+  music_hmac = var.discord_enabled && var.music_library_enabled && var.music_hmac_enabled
 
   secrets = {
     discord_token = { id = "${var.name}-discord-token", env = "DISCORD_TOKEN", consumers = ["discord"], enabled = var.discord_enabled }
@@ -28,15 +31,18 @@ locals {
     # to that schema). Without it, the runtime uses DATABASE_URL.
     runtime_database_url = { id = "${var.name}-runtime-database-url", env = "RUNTIME_DATABASE_URL", consumers = ["runtime"], enabled = local.history_in_postgres && var.runtime_database_url_override }
     # HMAC key of the music service account: the bot's S3 SDK talks to GCS's XML API.
-    music_hmac_access_id = { id = "${var.name}-music-hmac-access-id", env = "AWS_ACCESS_KEY_ID", consumers = ["discord"], enabled = var.discord_enabled && var.music_library_enabled }
-    music_hmac_secret    = { id = "${var.name}-music-hmac-secret", env = "AWS_SECRET_ACCESS_KEY", consumers = ["discord"], enabled = var.discord_enabled && var.music_library_enabled }
+    music_hmac_access_id = { id = "${var.name}-music-hmac-access-id", env = "AWS_ACCESS_KEY_ID", consumers = ["discord"], enabled = local.music_hmac }
+    music_hmac_secret    = { id = "${var.name}-music-hmac-secret", env = "AWS_SECRET_ACCESS_KEY", consumers = ["discord"], enabled = local.music_hmac }
   }
   enabled_secrets = { for k, s in local.secrets : k => s if s.enabled }
 
-  secret_readers = {
-    discord = google_service_account.vm.member
-    runtime = google_service_account.runtime.member
-  }
+  secret_readers = merge(
+    {
+      discord = google_service_account.vm.member
+      runtime = google_service_account.runtime.member
+    },
+    var.ingest_enabled ? { ingest = google_service_account.ingest[0].member } : {},
+  )
   secret_access = merge([
     for k, s in local.enabled_secrets : {
       for c in s.consumers : "${k}/${c}" => { secret = k, member = local.secret_readers[c] }

@@ -1,0 +1,32 @@
+# Manual deploy of the ingest worker to its Cloud Run service (infra/gcp/ingest.tf, ADR 0004).
+# Needs ingest_enabled = true in Terraform and GCP_INGEST_SERVICE on the production environment.
+
+name: Deploy ingest worker (GCP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch on main to deploy
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+
+# One deploy at a time; never cancel one halfway through.
+concurrency:
+  group: deploy-gcp-tatarbot-ingest
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy-cloudrun.yml
+    with:
+      ref: ${{ inputs.ref }}
+      component: ingest
+      context: discord_bot
+      target: worker
+      repository: tatarbot-ingest
+      service_variable: GCP_INGEST_SERVICE

@@ -12,7 +12,8 @@ none depends on `search_path` to find them:
 
 | Owner | Schema | Tables | Migrations | Applied by | History table |
 |---|---|---|---|---|---|
-| `discord_bot` | `public` | `library_tracks` | [`discord_bot/migrations/`](../../discord_bot/migrations/) | the bot, on every (re)connect (sqlx) | `_sqlx_migrations` |
+| `discord_bot` | `public` | `library_tracks`, `library_upload_requests`, `discord_notifications` | [`discord_bot/migrations/`](../../discord_bot/migrations/) | the bot, on every (re)connect (sqlx) | `_sqlx_migrations` |
+| `ingest-core` (ADR 0004) | `ingest` | `producers`, `jobs`, `job_events`, `switches` | [`discord_bot/crates/ingest-core/migrations/`](../../discord_bot/crates/ingest-core/migrations/) | an operator: `ingest-worker migrate` (never on startup) | `ingest._migrations` |
 | `agent_runtime` | `rag` | `documents`, `chunks`, `ingestion_jobs` | [`…/db/migrations/rag/`](../../agent_runtime/src/agent_runtime/db/migrations/rag/) | an operator: `make -C agent_runtime migrate-rag` (never on startup) | `public._agent_runtime_migrations` |
 | `agent_runtime` | `runtime` | `conversations` | [`…/db/migrations/runtime/`](../../agent_runtime/src/agent_runtime/db/migrations/runtime/) | an operator: `make -C agent_runtime migrate-runtime` | same |
 
@@ -196,3 +197,38 @@ The database itself is managed by Supabase (see
 [infra/gcp/README.md](../../infra/gcp/README.md#persistent-data)). Nothing here deletes data
 on a schedule except the bot's orphan sweep, which only removes stored objects that no row
 references, and the runtime's history retention (`CONVERSATION_RETENTION_DAYS`).
+
+## Ingest jobs (`ingest-core`, schema `ingest`; ADR 0004)
+
+Generic asynchronous file ingestion, used first by the music library's `/upload` when
+`LIBRARY_PROCESSING=worker`. The schema names no producer: tenants and actors are opaque
+strings (TatarBot uses `discord:guild:<id>` and `discord:user:<id>`).
+
+* **`producers`:** one row per producer: the service account its Google ID tokens carry, a
+  tenant prefix, allowed pipelines and source kinds, source URL hosts, size and rate limits,
+  `enabled`. Written with `ingest-worker register-producer`.
+* **`jobs`:** one row per `(producer_id, idempotency_key)`. `state` moves
+  `queued → processing → succeeded | failed | cancelled`.
+  * Each processing attempt holds a lease (`lease_owner`, `lease_expires_at`, 12 min).
+  * Every terminal change re-checks the lease owner under `SELECT … FOR UPDATE`, so a stale
+    attempt can't commit.
+  * `enqueued_at IS NULL` means the job needs a Cloud Tasks task; the reaper creates
+    `job-<id>-g<n>` tasks.
+* **`job_events`:** one row per terminal transition, in the same transaction.
+* **`switches`:** the kill switch (`global`, `producer:<id>`, `pipeline:<id>`). The budget
+  brake writes `global` with `updated_by = 'budget-alert'`.
+
+TatarBot's side (schema `public`, bot migrations, no foreign keys into `ingest`, so the bot's
+startup migrations never depend on the ingest schema):
+
+* **`library_upload_requests`:** one row per `/upload` interaction; its key
+  (`discord-interaction:<id>`) is also the job's idempotency key. It holds what only TatarBot
+  needs: guild, channel, title, and the 15-minute interaction token (cleared on use or
+  expiry).
+* **`discord_notifications`:** the transactional outbox. The worker's consumer hooks insert
+  exactly one row per finished request, in the same transaction as the job's outcome and the
+  `library_tracks` insert. The bot claims rows with a 60 s lease, sends, and marks them
+  `delivered` or `undeliverable`. Channel messages carry a fixed 25-character `nonce` with
+  `enforce_nonce`, so a re-send after a crash is deduplicated by Discord.
+
+Retention: finished jobs, requests and notifications are deleted after 30 days.

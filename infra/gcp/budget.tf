@@ -31,5 +31,17 @@ resource "google_billing_budget" "monthly" {
     spend_basis       = "FORECASTED_SPEND"
   }
 
+  # ADR 0004 budget brake: every budget update also goes to Pub/Sub, pushed to the ingest
+  # worker, which pauses ingestion once spend reaches the budget. Emails to billing admins
+  # stay on.
+  dynamic "all_updates_rule" {
+    for_each = local.budget_brake ? [1] : []
+    content {
+      pubsub_topic                   = google_pubsub_topic.budget[0].id
+      schema_version                 = "1.0"
+      disable_default_iam_recipients = false
+    }
+  }
+
   depends_on = [google_project_service.api]
 }

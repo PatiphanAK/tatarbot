@@ -112,3 +112,26 @@ jobs:
           docker stop -t 15 bot
           test "$(docker inspect -f '{{.State.ExitCode}}' bot)" = 0
           docker logs bot 2>&1 | grep -q 'shutting down'
+      # The ingest worker image (ADR 0004): same build stage, its own target.
+      - uses: docker/build-push-action@v7
+        with:
+          context: discord_bot
+          target: worker
+          tags: tatarbot-ingest-worker:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=tatarbot-discord-${{ matrix.arch }}
+      - name: Worker transcodes with the image's ffmpeg under its limits
+        # A 3 s WAV made without ffmpeg; the read-only root and the tmpfs mirror Cloud Run.
+        run: |
+          mkdir -p in
+          python3 - <<'PY2'
+          import math, struct, wave
+          with wave.open("in/tone.wav", "wb") as w:
+              w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+              w.writeframes(b"".join(struct.pack("<hh", v, v) for v in
+                  (int(8000 * math.sin(2 * math.pi * 440 * i / 48000)) for i in range(3 * 48000))))
+          PY2
+          docker run --rm --read-only --tmpfs /tmp --cpus 1 --memory 1g -v "$PWD/in:/in:ro" \
+            tatarbot-ingest-worker:ci bench /in/tone.wav | tee bench.json
+          grep -q '"ok":true' bench.json

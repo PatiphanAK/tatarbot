@@ -419,6 +419,80 @@ the audio files are copied.
 bucket (`force_destroy = false`), and delete the HMAC key by hand (`gcloud storage hmac
 update <id> --deactivate`, then `delete`). Supabase isn't managed here.
 
+## Ingest worker (ADR 0004)
+
+`/upload` processing can move from the bot to a private Cloud Run worker fed by Cloud Tasks
+(`ingest.tf`; design in ADR 0004, PR #19). Everything is off by default. Each phase is one
+variable, applied separately, and each can be rolled back by flipping it back.
+
+| Phase | Variables | Creates / changes |
+|---|---|---|
+| 1 | `ingest_enabled = true` | SAs `tatarbot-ingest` and `tatarbot-tasks`, Cloud Run `tatarbot-ingest` (gen2, 1 vCPU, 1 GiB, concurrency 1, max 1, 600 s), queue `tatarbot-ingest` (1 at a time, 4 attempts), Scheduler jobs (reap every 5 min, sweep hourly), registry `tatarbot-ingest`, IAM. With `billing_account` set: the budget brake (Pub/Sub topic and push). The VM also starts writing `ingest-id-token`. |
+| 3 | `library_processing = "worker"` | Bot env `LIBRARY_PROCESSING=worker`, `INGEST_URL`, `INGEST_ID_TOKEN_FILE` |
+| 3 | `library_storage = "gcs"` | VM gets `objectViewer` on the bucket and writes `gcs-token` (downscoped); bot env `LIBRARY_STORAGE=gcs`. Deletes and the orphan sweep move to the worker. |
+| 4 | `music_hmac_enabled = false` | Deletes the two HMAC secrets and the `tatarbot-music` SA. **Needs explicit approval.** Delete the HMAC key itself with `gcloud storage hmac delete` first. |
+
+Preconditions refuse an out-of-order combination. Plans on 2026-11-03: defaults 63 to add
+(the three new APIs); phase 1 79; phase 3 80; phase 4 74; with a billing account 83.
+
+**Phase 1, after apply** (nothing serves until these run):
+
+```sh
+cd discord_bot
+DATABASE_URL="$DATABASE_URL" cargo run --release --bin ingest-worker -- migrate
+DATABASE_URL="$DATABASE_URL" cargo run --release --bin ingest-worker -- \
+  $(terraform -chdir=../infra/gcp output -json ingest | jq -r .register_producer | cut -d' ' -f2-)
+# GitHub: set GCP_INGEST_SERVICE (and GCP_RUNTIME_SERVICE) from `terraform output
+# github_actions_variables`, then run "Deploy ingest worker (GCP)".
+```
+
+**Verify before phase 3** (ADR 0004 acceptance checks; the code-level ones are tests):
+
+1. `curl -sI "$(terraform output -json ingest | jq -r .url)/v1/jobs"` from outside: 404 (internal ingress).
+2. From the VM: the bot's token on `/internal/process` → 403; on `/v1/jobs` with a test
+   body → 201 (then cancel it).
+3. `gcloud tasks queues describe tatarbot-ingest --location asia-southeast1`; a test upload
+   in a test guild with `library_processing = worker` set *only for a test bot*, or by
+   calling `/v1/jobs` directly. Then watch the task's attempt log and `ingest.jobs`.
+4. `gcloud scheduler jobs run tatarbot-ingest-reap --location asia-southeast1` → 200 in the
+   worker's logs.
+5. Kill switch: `ingest-worker switch pause global "test"`; a submission returns `paused`;
+   `switch resume global`; the reaper drains.
+6. Budget brake (with a billing account): publish a test message with
+   `costAmount >= budgetAmount` to `tatarbot-budget`; `ingest.switches` shows
+   `budget-alert`.
+7. `gcs` mode: on the VM, `cat /run/tatarbot/agent-token/gcs-token` exists. Play a library
+   track. A write with that token (`curl -X POST …/upload/storage/v1/b/<bucket>/o`) must
+   fail 403.
+
+**Assumptions that need real GCP to confirm:**
+
+* Ingress and identity:
+  * Internal ingress accepts Cloud Tasks, Cloud Scheduler and Pub/Sub push from the same
+    project on the deterministic `run.app` URL (`https://tatarbot-ingest-<project
+    number>.asia-southeast1.run.app`). Tokens use that audience.
+  * Cloud Run forwards `Authorization` unchanged (the app verifies signatures). The
+    stripped-signature behaviour of `X-Serverless-Authorization` is documented, and the
+    app's rejection of it is tested.
+* Service agents:
+  * The Cloud Tasks service agent has `roles/cloudtasks.serviceAgent` automatically (API
+    enabled after 2019).
+  * Pub/Sub push needs no extra token-creator grant on this (new) project.
+  * `billing-budget-alert@system.gserviceaccount.com` is the publisher Cloud Billing uses.
+* Storage:
+  * The STS token exchange with a Credential Access Boundary works from the VM's metadata
+    token, and the JSON API media download honours it.
+  * songbird streams the bearer-authorized media URL, including range requests when
+    seeking.
+* Runtime behaviour:
+  * gen2 applies the ffmpeg rlimits as Linux does.
+  * Real transcode times on Cloud Run: the image benchmark (1 vCPU, 1 GiB, local Docker) took
+    1.9 s for a 4-minute FLAC and 6.9 s for a 15-minute MP3 (synthetic tones).
+  * Cold-start latency and billed time are unmeasured.
+* Discord:
+  * `enforce_nonce` dedupes a repeated channel message within the 60 s lease. Discord
+    documents "a few minutes".
+
 ## Known gaps
 
 * Nothing is applied yet. Every live check in step 7 is open, including the cold start on

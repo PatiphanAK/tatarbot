@@ -35,7 +35,7 @@ resource "google_storage_bucket" "music" {
 }
 
 resource "google_service_account" "music" {
-  count = var.music_library_enabled ? 1 : 0
+  count = var.music_library_enabled && var.music_hmac_enabled ? 1 : 0
 
   account_id   = "${var.name}-music"
   display_name = "TatarBot music library (HMAC key for the bot)"
@@ -44,9 +44,20 @@ resource "google_service_account" "music" {
 # Read, write, delete and list objects in this bucket only. Presigned GET URLs are signed
 # with the HMAC key, so playback needs nothing more.
 resource "google_storage_bucket_iam_member" "music" {
-  count = var.music_library_enabled ? 1 : 0
+  count = var.music_library_enabled && var.music_hmac_enabled ? 1 : 0
 
   bucket = google_storage_bucket.music[0].name
   role   = "roles/storage.objectUser"
   member = google_service_account.music[0].member
+}
+
+# ADR 0004 phase 3 (library_storage = gcs): the bot plays objects with a token the host
+# downscopes (Credential Access Boundary) from the VM's own token to read-only on this bucket
+# and prefix. A boundary can only narrow access, so the VM's identity needs read here.
+resource "google_storage_bucket_iam_member" "vm_read" {
+  count = var.music_library_enabled && var.library_storage == "gcs" ? 1 : 0
+
+  bucket = google_storage_bucket.music[0].name
+  role   = "roles/storage.objectViewer"
+  member = google_service_account.vm.member
 }

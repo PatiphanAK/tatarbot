@@ -24,6 +24,16 @@ locals {
       AGENT_ID_TOKEN_FILE = "${local.id_token_mount}/id-token"
       RUST_LOG            = "info,serenity=warn"
     },
+    # ADR 0004 phase 3: uploads processed by the ingest worker.
+    var.library_processing == "worker" ? {
+      LIBRARY_PROCESSING   = "worker"
+      INGEST_URL           = local.ingest_url
+      INGEST_ID_TOKEN_FILE = "${local.id_token_mount}/ingest-id-token"
+    } : {},
+    var.library_storage == "gcs" ? {
+      LIBRARY_STORAGE = "gcs"
+      GCS_TOKEN_FILE  = "${local.id_token_mount}/gcs-token"
+    } : {},
     var.music_library_enabled ? {
       MUSIC_S3_BUCKET      = local.music_bucket
       MUSIC_S3_PREFIX      = var.music_library_prefix
@@ -38,6 +48,20 @@ locals {
       AWS_EC2_METADATA_DISABLED        = "true"
     } : {},
   )
+
+  # Read-only on the library prefix of the music bucket (Credential Access Boundary).
+  gcs_boundary = jsonencode({
+    accessBoundary = {
+      accessBoundaryRules = [{
+        availablePermissions = ["inRole:roles/storage.objectViewer"]
+        availableResource    = "//storage.googleapis.com/projects/_/buckets/${local.music_bucket}"
+        availabilityCondition = {
+          # Double quotes: the JSON is passed in a single-quoted shell argument.
+          expression = "resource.name.startsWith(\"projects/_/buckets/${local.music_bucket}/objects/${var.music_library_prefix}\")"
+        }
+      }]
+    }
+  })
 
   startup_services = {
     discord = {
@@ -64,6 +88,8 @@ locals {
     docker_subnet            = var.docker_subnet
     services                 = local.startup_services
     id_token_audience        = local.runtime_url
+    ingest_audience          = var.ingest_enabled ? local.ingest_url : ""
+    gcs_boundary             = var.library_storage == "gcs" ? local.gcs_boundary : ""
     id_token_refresh_minutes = var.id_token_refresh_minutes
     bot_uid                  = var.bot_container_uid
   })
@@ -124,6 +150,19 @@ resource "google_compute_instance" "main" {
     precondition {
       condition     = alltrue([for v in values(local.discord_env) : !strcontains(v, "\n")])
       error_message = "Environment values must be single lines (they go into docker --env-file)."
+    }
+    # ADR 0004 phases, in order.
+    precondition {
+      condition     = var.library_processing == "local" || var.ingest_enabled
+      error_message = "library_processing = worker needs ingest_enabled (phase 1 first)."
+    }
+    precondition {
+      condition     = var.library_storage == "s3" || var.library_processing == "worker"
+      error_message = "library_storage = gcs is read-only: it needs library_processing = worker."
+    }
+    precondition {
+      condition     = var.music_hmac_enabled || var.library_storage == "gcs" || !var.music_library_enabled
+      error_message = "music_hmac_enabled = false removes the bot's S3 credentials: set library_storage = gcs first."
     }
   }
 

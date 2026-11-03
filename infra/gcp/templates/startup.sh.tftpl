@@ -10,8 +10,9 @@
 #   /etc/tatarbot/<svc>.secrets       "ENV_NAME secret-id" lines (from Terraform)
 #   /run/tatarbot/<svc>.secrets.env   secret values, tmpfs, mode 600, refreshed on every start
 #   /var/lib/tatarbot/images/<svc>    image reference; the unit starts only once it exists
-#   /run/tatarbot/agent-token/id-token  ID token for the Cloud Run runtime, refreshed by a
-#                                       timer, readable by the bot's UID only (mounted ro)
+#   /run/tatarbot/agent-token/          short-lived tokens refreshed by a timer, readable by
+#                                       the bot's UID only (mounted ro): id-token (runtime),
+#                                       ingest-id-token (ingest worker), gcs-token (GCS read)
 #
 # Containers can't reach the metadata server (iptables, DOCKER-USER), so they never get the
 # VM service account. The host fetches the secrets and the runtime's ID token with it.
@@ -56,31 +57,68 @@ done
 SH
 bash "$CONF/metadata-block.sh" -I
 
-# ---- ID token for the Agent Runtime (Cloud Run, IAM-protected)
-# The VM's service account has run.invoker on that one service. The token is
-# audience-bound to the runtime's URL and lasts an hour; the timer refreshes it well before.
+# ---- Short-lived tokens the bot reads (Cloud Run IAM-protected services, GCS)
+# * id-token: audience = the Agent Runtime's URL (sent as X-Serverless-Authorization).
+# * ingest-id-token (ADR 0004): audience = the ingest worker's URL (sent as Authorization;
+#   the worker verifies it itself).
+# * gcs-token (ADR 0004, library_storage = gcs): the VM's access token downscoped by a
+#   Credential Access Boundary to read-only on the music bucket's library prefix.
+# Each lasts an hour; the timer refreshes them well before. Each is written atomically,
+# readable by the bot's UID only, and refreshed independently (one failure doesn't block the
+# others; the script exits non-zero so the unit shows it).
 cat > "$CONF/id-token.sh" <<'SH'
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 dir=/run/tatarbot/agent-token
+md=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default
 install -d -m 0750 -o root -g ${bot_uid} "$dir"
-token="$(curl -fsS --retry 5 --get -H 'Metadata-Flavor: Google' \
-  --data-urlencode 'audience=${id_token_audience}' --data 'format=full' \
-  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity')"
-case "$token" in
-  eyJ*.*.*) ;;
-  *) echo "unexpected identity token response" >&2; exit 1 ;;
-esac
-tmp="$(mktemp "$dir/.id-token.XXXXXX")"
-printf '%s' "$token" > "$tmp"
-chown root:${bot_uid} "$tmp"
-chmod 0640 "$tmp"
-mv "$tmp" "$dir/id-token"   # atomic: the bot never reads a half-written token
+failed=0
+
+write() { # write FILE TOKEN: atomic, so the bot never reads a half-written token
+  local tmp
+  tmp="$(mktemp "$dir/.token.XXXXXX")" || return 1
+  printf '%s' "$2" > "$tmp" && chown root:${bot_uid} "$tmp" && chmod 0640 "$tmp" && mv "$tmp" "$dir/$1"
+}
+
+id_token() { # id_token AUDIENCE FILE
+  local token
+  token="$(curl -fsS --retry 5 --get -H 'Metadata-Flavor: Google' \
+    --data-urlencode "audience=$1" --data 'format=full' "$md/identity")" || return 1
+  case "$token" in
+    eyJ*.*.*) write "$2" "$token" ;;
+    *) echo "unexpected identity token response for $2" >&2; return 1 ;;
+  esac
+}
+
+id_token '${id_token_audience}' id-token || failed=1
+%{ if ingest_audience != "" ~}
+id_token '${ingest_audience}' ingest-id-token || failed=1
+%{ endif ~}
+%{ if gcs_boundary != "" ~}
+gcs_token() {
+  local access response token
+  access="$(curl -fsS --retry 5 -H 'Metadata-Flavor: Google' "$md/token" \
+    | sed -E 's/.*"access_token":"([^"]+)".*/\1/')" || return 1
+  response="$(curl -fsS --retry 5 https://sts.googleapis.com/v1/token \
+    --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+    --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:access_token' \
+    --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:access_token' \
+    --data-urlencode "subject_token=$access" \
+    --data-urlencode 'options=${gcs_boundary}')" || return 1
+  token="$(printf '%s' "$response" | tr -d '\n ' | sed -E 's/.*"access_token":"([^"]+)".*/\1/')"
+  case "$token" in
+    *[!A-Za-z0-9._~+/=-]*|'') echo "unexpected STS response" >&2; return 1 ;;
+  esac
+  write gcs-token "$token"
+}
+gcs_token || failed=1
+%{ endif ~}
+exit "$failed"
 SH
 
 cat > /etc/systemd/system/tatarbot-agent-token.service <<'UNIT'
 [Unit]
-Description=TatarBot: refresh the Agent Runtime ID token
+Description=TatarBot: refresh the bot's short-lived tokens (runtime, ingest, GCS)
 After=network-online.target
 Wants=network-online.target
 
@@ -91,7 +129,7 @@ UNIT
 
 cat > /etc/systemd/system/tatarbot-agent-token.timer <<'UNIT'
 [Unit]
-Description=TatarBot: refresh the Agent Runtime ID token every ${id_token_refresh_minutes} min
+Description=TatarBot: refresh the bot's short-lived tokens every ${id_token_refresh_minutes} min
 
 [Timer]
 OnActiveSec=0

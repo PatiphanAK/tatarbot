@@ -285,3 +285,69 @@ variable "budget_amount" {
   type        = number
   default     = 20
 }
+
+# ---- Ingest worker (ADR 0004). Everything is off by default; turn on in phases.
+
+variable "ingest_enabled" {
+  description = "Phase 1: create the ingest worker (Cloud Run), its Cloud Tasks queue, Scheduler jobs, service accounts and IAM. Off: nothing is created."
+  type        = bool
+  default     = false
+}
+
+variable "library_processing" {
+  description = "Phase 3: where /upload is processed. local = in the bot (today); worker = the ingest worker (needs ingest_enabled)."
+  type        = string
+  default     = "local"
+
+  validation {
+    condition     = contains(["local", "worker"], var.library_processing)
+    error_message = "library_processing must be local or worker."
+  }
+}
+
+variable "library_storage" {
+  description = "Phase 3: how the bot reads library audio. s3 = S3 API with the HMAC key (today); gcs = read-only downscoped token minted on the host (needs library_processing = worker)."
+  type        = string
+  default     = "s3"
+
+  validation {
+    condition     = contains(["s3", "gcs"], var.library_storage)
+    error_message = "library_storage must be s3 or gcs."
+  }
+}
+
+variable "music_hmac_enabled" {
+  description = "Phase 4 turns this off: deletes the HMAC secrets and the music service account. Only after library_storage = gcs has run cleanly (needs explicit approval)."
+  type        = bool
+  default     = true
+}
+
+variable "ingest_cpu" {
+  description = "Worker vCPU (1 recommended; 0.5 is allowed at concurrency 1 if the benchmark says it's fast enough)."
+  type        = string
+  default     = "1"
+}
+
+variable "ingest_memory" {
+  description = "Worker memory. /tmp is in memory on Cloud Run: 25 MiB input + ~15 MiB output + ffmpeg (RLIMIT_AS 512 MiB)."
+  type        = string
+  default     = "1Gi"
+}
+
+variable "ingest_max_instances" {
+  description = "Hard cost ceiling: at most this many worker instances (concurrency is 1)."
+  type        = number
+  default     = 1
+}
+
+variable "ingest_request_timeout_seconds" {
+  description = "Cloud Run request timeout for one processing attempt; the queue's dispatch deadline is this + 10 s and the lease (12 min) must exceed it."
+  type        = number
+  default     = 600
+}
+
+variable "budget_brake_enabled" {
+  description = "With ingest_enabled and a billing_account: budget notifications are pushed to the worker, which pauses all ingestion when spend reaches the budget (never disables billing)."
+  type        = bool
+  default     = true
+}

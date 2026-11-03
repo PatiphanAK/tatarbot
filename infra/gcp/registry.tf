@@ -2,7 +2,7 @@
 # that keeps the newest registry_keep_images tagged images (the rollback window).
 
 locals {
-  services      = toset(["runtime", "discord"])
+  services      = toset(concat(["runtime", "discord"], var.ingest_enabled ? ["ingest"] : []))
   registry_host = "${var.region}-docker.pkg.dev"
 }
 
