@@ -5,7 +5,7 @@
 //!   opened because only the demuxers in `FORMAT_WHITELIST` are allowed. The
 //!   image's ffmpeg is also built without them.
 //! * Each process runs with limits: address space, CPU seconds, output file
-//!   size, and a wall-clock timeout (killed on expiry).
+//!   size, stack size, and a wall-clock timeout (killed on expiry).
 //! * Output: first audio stream only, metadata stripped, Ogg Opus 48 kHz
 //!   stereo with 20 ms frames (what Discord voice sends, so playback passes
 //!   the packets through), capped at 15 minutes.
@@ -51,7 +51,15 @@ pub struct Ffmpeg {
     settings: FfmpegSettings,
 }
 
-/// What a process may consume (RLIMIT_AS, RLIMIT_CPU, RLIMIT_FSIZE).
+/// Stack limit for both tools. glibc reserves every thread's stack at the soft
+/// RLIMIT_STACK, so an inherited large value multiplies across ffmpeg's threads (ffmpeg 8
+/// runs each pipeline stage in its own thread, whatever `-threads` says) and can exhaust
+/// RLIMIT_AS: on a host with 16 MiB, `pthread_create` failed under the 512 MiB limit.
+/// 8 MiB is the usual Linux default; set explicitly so the host's value doesn't matter.
+const STACK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// What a process may consume (RLIMIT_AS, RLIMIT_CPU, RLIMIT_FSIZE; RLIMIT_STACK is
+/// always `STACK_BYTES`).
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     memory_bytes: u64,
@@ -111,11 +119,42 @@ impl Ffmpeg {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::info!(
             program = %program.display(),
-            status = %output.status,
+            exit = %describe_exit(&output.status),
             stderr = %stderr.chars().take(500).collect::<String>(),
             "audio processing refused or failed"
         );
         Err(AudioError::Unsupported)
+    }
+}
+
+/// Exit code, or the signal and the limit it usually means: SIGXCPU = RLIMIT_CPU,
+/// SIGXFSZ = RLIMIT_FSIZE, SIGKILL = the timeout (kill_on_drop) or the kernel,
+/// SIGSEGV/SIGABRT/SIGBUS = often a failed allocation under RLIMIT_AS.
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            let meaning = match signal {
+                libc::SIGXCPU => "SIGXCPU, CPU-time limit",
+                libc::SIGXFSZ => "SIGXFSZ, file-size limit",
+                libc::SIGKILL => "SIGKILL",
+                libc::SIGSEGV => "SIGSEGV, possibly a failed allocation (address-space limit)",
+                libc::SIGABRT => "SIGABRT, possibly a failed allocation (address-space limit)",
+                libc::SIGBUS => "SIGBUS",
+                _ => "other signal",
+            };
+            let core = if status.core_dumped() {
+                ", core dumped"
+            } else {
+                ""
+            };
+            return format!("signal {signal} ({meaning}{core})");
+        }
+    }
+    match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => status.to_string(),
     }
 }
 
@@ -127,7 +166,7 @@ fn file_arg(path: &Path) -> String {
 #[cfg(unix)]
 fn apply_limits(command: &mut Command, limits: Limits) {
     // SAFETY: the closure runs in the forked child before exec and only calls
-    // setrlimit, which is async-signal-safe; it allocates nothing.
+    // getrlimit/setrlimit, which are async-signal-safe; it allocates nothing.
     unsafe {
         command.pre_exec(move || {
             let set = |resource, value: u64| {
@@ -144,6 +183,17 @@ fn apply_limits(command: &mut Command, limits: Limits) {
             set(libc::RLIMIT_AS, limits.memory_bytes)?;
             set(libc::RLIMIT_CPU, limits.cpu_seconds)?;
             set(libc::RLIMIT_FSIZE, limits.file_bytes)?;
+            // Never above the inherited hard limit: raising it needs privileges.
+            let mut stack = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let hard = if libc::getrlimit(libc::RLIMIT_STACK, &mut stack) == 0 {
+                stack.rlim_max
+            } else {
+                STACK_BYTES
+            };
+            set(libc::RLIMIT_STACK, STACK_BYTES.min(hard))?;
             Ok(())
         });
     }
@@ -300,6 +350,7 @@ mod tests {
     // ---- Against the real binaries (`ffmpeg`/`ffprobe` on PATH).
 
     fn ffmpeg() -> Ffmpeg {
+        crate::test_support::trace_to_test_output();
         Ffmpeg::new(FfmpegSettings::default())
     }
 
@@ -347,6 +398,32 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "opus,48000,2");
+    }
+
+    /// glibc sizes thread stacks from the inherited RLIMIT_STACK. ffmpeg runs several
+    /// threads, so a host with a large stack limit (the Ubuntu 26.04 GitHub runner: 16 MiB)
+    /// made `pthread_create` fail under RLIMIT_AS. The wrapper must not depend on it.
+    #[tokio::test]
+    #[ignore = "needs ffmpeg/ffprobe on PATH"]
+    async fn ffmpeg_ignores_a_large_inherited_stack_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = make_mp3(dir.path()).await;
+        let mut old = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: plain getrlimit/setrlimit on this process; restored below.
+        unsafe { assert_eq!(libc::getrlimit(libc::RLIMIT_STACK, &mut old), 0) };
+        let large = libc::rlimit {
+            rlim_cur: (64u64 * 1024 * 1024).min(old.rlim_max) as libc::rlim_t,
+            rlim_max: old.rlim_max,
+        };
+        unsafe { assert_eq!(libc::setrlimit(libc::RLIMIT_STACK, &large), 0) };
+        let result = ffmpeg()
+            .transcode(&input, &dir.path().join("out.ogg"))
+            .await;
+        unsafe { libc::setrlimit(libc::RLIMIT_STACK, &old) };
+        result.unwrap();
     }
 
     #[tokio::test]
