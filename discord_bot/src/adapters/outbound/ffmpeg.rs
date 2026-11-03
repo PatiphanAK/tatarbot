@@ -5,7 +5,7 @@
 //!   opened because only the demuxers in `FORMAT_WHITELIST` are allowed. The
 //!   image's ffmpeg is also built without them.
 //! * Each process runs with limits: address space, CPU seconds, output file
-//!   size, and a wall-clock timeout (killed on expiry).
+//!   size, stack size, and a wall-clock timeout (killed on expiry).
 //! * Output: first audio stream only, metadata stripped, Ogg Opus 48 kHz
 //!   stereo with 20 ms frames (what Discord voice sends, so playback passes
 //!   the packets through), capped at 15 minutes.
@@ -51,7 +51,15 @@ pub struct Ffmpeg {
     settings: FfmpegSettings,
 }
 
-/// What a process may consume (RLIMIT_AS, RLIMIT_CPU, RLIMIT_FSIZE).
+/// Stack limit for both tools. glibc reserves every thread's stack at the soft
+/// RLIMIT_STACK, so an inherited large value multiplies across ffmpeg's threads (ffmpeg 8
+/// runs each pipeline stage in its own thread, whatever `-threads` says) and can exhaust
+/// RLIMIT_AS: on a host with 16 MiB, `pthread_create` failed under the 512 MiB limit.
+/// 8 MiB is the usual Linux default; set explicitly so the host's value doesn't matter.
+const STACK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// What a process may consume (RLIMIT_AS, RLIMIT_CPU, RLIMIT_FSIZE; RLIMIT_STACK is
+/// always `STACK_BYTES`).
 #[derive(Debug, Clone, Copy)]
 struct Limits {
     memory_bytes: u64,
@@ -158,7 +166,7 @@ fn file_arg(path: &Path) -> String {
 #[cfg(unix)]
 fn apply_limits(command: &mut Command, limits: Limits) {
     // SAFETY: the closure runs in the forked child before exec and only calls
-    // setrlimit, which is async-signal-safe; it allocates nothing.
+    // getrlimit/setrlimit, which are async-signal-safe; it allocates nothing.
     unsafe {
         command.pre_exec(move || {
             let set = |resource, value: u64| {
@@ -175,6 +183,17 @@ fn apply_limits(command: &mut Command, limits: Limits) {
             set(libc::RLIMIT_AS, limits.memory_bytes)?;
             set(libc::RLIMIT_CPU, limits.cpu_seconds)?;
             set(libc::RLIMIT_FSIZE, limits.file_bytes)?;
+            // Never above the inherited hard limit: raising it needs privileges.
+            let mut stack = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let hard = if libc::getrlimit(libc::RLIMIT_STACK, &mut stack) == 0 {
+                stack.rlim_max
+            } else {
+                STACK_BYTES
+            };
+            set(libc::RLIMIT_STACK, STACK_BYTES.min(hard))?;
             Ok(())
         });
     }
@@ -381,6 +400,32 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "opus,48000,2");
     }
 
+    /// glibc sizes thread stacks from the inherited RLIMIT_STACK. ffmpeg runs several
+    /// threads, so a host with a large stack limit (the Ubuntu 26.04 GitHub runner: 16 MiB)
+    /// made `pthread_create` fail under RLIMIT_AS. The wrapper must not depend on it.
+    #[tokio::test]
+    #[ignore = "needs ffmpeg/ffprobe on PATH"]
+    async fn ffmpeg_ignores_a_large_inherited_stack_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = make_mp3(dir.path()).await;
+        let mut old = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: plain getrlimit/setrlimit on this process; restored below.
+        unsafe { assert_eq!(libc::getrlimit(libc::RLIMIT_STACK, &mut old), 0) };
+        let large = libc::rlimit {
+            rlim_cur: (64u64 * 1024 * 1024).min(old.rlim_max) as libc::rlim_t,
+            rlim_max: old.rlim_max,
+        };
+        unsafe { assert_eq!(libc::setrlimit(libc::RLIMIT_STACK, &large), 0) };
+        let result = ffmpeg()
+            .transcode(&input, &dir.path().join("out.ogg"))
+            .await;
+        unsafe { libc::setrlimit(libc::RLIMIT_STACK, &old) };
+        result.unwrap();
+    }
+
     #[tokio::test]
     #[ignore = "needs ffmpeg/ffprobe on PATH"]
     async fn ffmpeg_refuses_playlists_and_non_audio() {
@@ -420,235 +465,6 @@ mod tests {
             let out = dir.path().join(format!("{name}.ogg"));
             assert!(ffmpeg().transcode(&path, &out).await.is_err(), "{name}");
         }
-    }
-
-    /// TEMPORARY (remove before merge): runs the production probe and transcode with one
-    /// factor changed at a time and fails with the whole table, so CI shows it.
-    #[tokio::test]
-    #[ignore = "diagnostic, needs ffmpeg/ffprobe on PATH"]
-    async fn ffmpeg_diagnose_runner() {
-        use std::fmt::Write as _;
-        use std::os::unix::process::CommandExt;
-
-        const MIB: u64 = 1024 * 1024;
-        let dir = tempfile::tempdir().unwrap();
-        let input = make_mp3(dir.path()).await;
-        let mut report = String::new();
-
-        let sh = |cmd: &str| {
-            let out = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .output()
-                .unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
-                + String::from_utf8_lossy(&out.stderr).trim()
-        };
-        writeln!(report, "nproc: {}", sh("nproc")).unwrap();
-        writeln!(
-            report,
-            "ffprobe: {} | {}",
-            sh("command -v ffprobe"),
-            sh("ffprobe -version | head -1")
-        )
-        .unwrap();
-        writeln!(
-            report,
-            "missing libs (ffprobe): [{}]",
-            sh("ldd \"$(command -v ffprobe)\" | grep 'not found'")
-        )
-        .unwrap();
-        writeln!(
-            report,
-            "missing libs (ffmpeg):  [{}]",
-            sh("ldd \"$(command -v ffmpeg)\" | grep 'not found'")
-        )
-        .unwrap();
-        writeln!(
-            report,
-            "runner limits: {}",
-            sh("ulimit -v; ulimit -t; ulimit -f").replace('\n', " ")
-        )
-        .unwrap();
-        writeln!(
-            report,
-            "env names: {}",
-            std::env::vars()
-                .map(|(k, _)| k)
-                .filter(|k| !k.contains("TOKEN") && !k.contains("SECRET"))
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-        .unwrap();
-
-        let out = dir.path().join("o.ogg");
-        let transcode_args: Vec<String> = [
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-protocol_whitelist",
-            "file",
-            "-format_whitelist",
-            FORMAT_WHITELIST,
-            "-i",
-        ]
-        .into_iter()
-        .map(String::from)
-        .chain([file_arg(&input)])
-        .chain(
-            [
-                "-map",
-                "0:a:0",
-                "-vn",
-                "-sn",
-                "-dn",
-                "-map_metadata",
-                "-1",
-                "-map_chapters",
-                "-1",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "-c:a",
-                "libopus",
-                "-b:a",
-                "128k",
-                "-vbr",
-                "on",
-                "-frame_duration",
-                "20",
-                "-application",
-                "audio",
-                "-t",
-                "900",
-                "-threads",
-                "1",
-                "-f",
-                "ogg",
-                "-y",
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .chain([file_arg(&out)])
-        .collect();
-
-        writeln!(
-            report,
-            "runner /proc/self/limits:\n{}",
-            sh("grep -E 'stack|address|processes|open files' /proc/self/limits")
-        )
-        .unwrap();
-        writeln!(report, "glibc: {}", sh("ldd --version | head -1")).unwrap();
-
-        // Round 2: the transcode fails only under RLIMIT_AS 512M with pthread_create EAGAIN.
-        // Which address-space consumer: thread stacks (sized from RLIMIT_STACK), malloc arenas,
-        // or something else? Production limits plus one change each; env_clear as in prod.
-        const PROD: (u64, u64, u64) = (512 * MIB, 240, 64 * MIB);
-        // (label, AS, extra RLIMIT_STACK, extra env)
-        type Case<'a> = (&'a str, u64, Option<u64>, Vec<(&'a str, &'a str)>);
-        let cases: Vec<Case> = vec![
-            ("production", PROD.0, None, vec![]),
-            ("+ STACK 8M", PROD.0, Some(8 * MIB), vec![]),
-            ("+ STACK 2M", PROD.0, Some(2 * MIB), vec![]),
-            (
-                "+ MALLOC_ARENA_MAX=1",
-                PROD.0,
-                None,
-                vec![("MALLOC_ARENA_MAX", "1")],
-            ),
-            (
-                "+ MALLOC_ARENA_MAX=2",
-                PROD.0,
-                None,
-                vec![("MALLOC_ARENA_MAX", "2")],
-            ),
-            ("AS 640M", 640 * MIB, None, vec![]),
-            ("AS 768M", 768 * MIB, None, vec![]),
-            ("AS 1G", 1024 * MIB, None, vec![]),
-            ("AS 1.5G", 1536 * MIB, None, vec![]),
-        ];
-        for (label, mem, stack, env) in &cases {
-            let (mem, stack) = (*mem, *stack);
-            let mut c = std::process::Command::new("ffmpeg");
-            c.args(&transcode_args)
-                .stdin(Stdio::null())
-                .env_clear()
-                .envs(env.iter().copied());
-            unsafe {
-                c.pre_exec(move || {
-                    let mut set = vec![
-                        (libc::RLIMIT_AS, mem),
-                        (libc::RLIMIT_CPU, PROD.1),
-                        (libc::RLIMIT_FSIZE, PROD.2),
-                    ];
-                    if let Some(st) = stack {
-                        set.push((libc::RLIMIT_STACK, st));
-                    }
-                    for (res, v) in set {
-                        let l = libc::rlimit {
-                            rlim_cur: v as libc::rlim_t,
-                            rlim_max: v as libc::rlim_t,
-                        };
-                        if libc::setrlimit(res, &l) != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
-                    Ok(())
-                });
-            }
-            let r = match c.output() {
-                Ok(o) => format!(
-                    "{} | {}",
-                    describe_exit(&o.status),
-                    String::from_utf8_lossy(&o.stderr)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(160)
-                        .collect::<String>()
-                ),
-                Err(e) => format!("spawn error: {e}"),
-            };
-            writeln!(report, "transcode {label:<22} -> {r}").unwrap();
-        }
-
-        // Threads and peak address space of an unlimited transcode (sampled from /proc).
-        let mut child = std::process::Command::new("ffmpeg")
-            .args(&transcode_args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .env_clear()
-            .spawn()
-            .unwrap();
-        let (mut max_threads, mut vm_peak) = (0u64, String::new());
-        let status_path = format!("/proc/{}/status", child.id());
-        loop {
-            if let Ok(st) = std::fs::read_to_string(&status_path) {
-                for line in st.lines() {
-                    if let Some(v) = line.strip_prefix("Threads:") {
-                        max_threads = max_threads.max(v.trim().parse().unwrap_or(0));
-                    }
-                    if line.starts_with("VmPeak:") {
-                        vm_peak = line.to_owned();
-                    }
-                }
-            }
-            if child.try_wait().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        writeln!(
-            report,
-            "unlimited transcode: max threads seen {max_threads}, last {vm_peak}"
-        )
-        .unwrap();
-
-        panic!("diagnostic report (intentional failure):\n{report}");
     }
 
     #[tokio::test]
