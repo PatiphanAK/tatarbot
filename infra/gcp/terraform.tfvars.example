@@ -1,0 +1,18 @@
+project_id     = "tatarbot-xxxxxx"
+model_base_url = "https://ws-xxxxxxxx.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+model_name     = "qwen3.8-flash"
+
+region = "asia-southeast1"
+zone   = "asia-southeast1-b"
+
+runtime_extra_environment = {
+  SEARCH_MAX_SEARCHES    = "3"
+  SEARCH_MAX_RESULTS     = "5"
+  SEARCH_TIMEOUT_SECONDS = "10"
+}
+
+music_library_enabled = true
+
+# Billing account for the budget alert (gcloud billing accounts list). Empty skips it.
+billing_account = ""
+budget_amount   = 20

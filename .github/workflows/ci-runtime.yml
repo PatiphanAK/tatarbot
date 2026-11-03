@@ -65,8 +65,16 @@ jobs:
       - run: make test
 
   image-integration:
-    name: image + integration tests
-    runs-on: ubuntu-24.04-arm # same architecture as the deployed image
+    name: image + integration tests (${{ matrix.arch }})
+    # Same architecture as the deployed images: amd64 on GCP, arm64 on AWS until it is
+    # torn down (then drop arm64).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
         with:

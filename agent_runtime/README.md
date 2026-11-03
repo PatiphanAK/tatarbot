@@ -42,8 +42,10 @@ sqs_worker.py ─▶ application/ingestion.py Ingestor ─▶ DocumentRepository
 * `domain/inference.py` defines the generic contract: `InferenceRequest` (messages + params),
   `InferenceResult`, and `ChatMessage`. It contains no model name, URL, HTTP or Discord types.
 * `ChatService` and `SearchAgent` depend only on ports. `VLLMModel` is a plain OpenAI Chat
-  Completions client, so any compatible backend works by configuration; history is in
-  memory (`ConversationStore`), lost on restart, which is why the runtime runs one task.
+  Completions client, so any compatible backend works by configuration. History is behind
+  `ConversationStore`: in memory (default, lost on restart) or in Postgres
+  (`CONVERSATION_STORE=postgres`, `adapters/outbound/postgres_conversations.py`), which
+  survives restarts, deploys and Cloud Run scaling to zero.
 * `domain/language.py` and `domain/guardrails.py` are pure policies `ChatService` applies
   around the model call (see below).
 * `main.py` (`create_app`) is the composition root; `build_embedder` picks the embedding
@@ -201,14 +203,16 @@ are never returned to the caller.
 | `TURN_TIMEOUT_SECONDS` | no | `110` | Whole turn; keep below the bot's timeout |
 | `SYSTEM_PROMPT`, `SYSTEM_PROMPT_FILE` | no | `prompts/system.md` | Override the system prompt |
 | `GUARDRAILS_ENABLED` | no | `true` | Input/output guardrails |
-| `MAX_HISTORY_MESSAGES`, `MAX_CONVERSATIONS` | no | `20`, `10000` | History window and memory bound |
+| `MAX_HISTORY_MESSAGES`, `MAX_CONVERSATIONS` | no | `20`, `10000` | History window and memory bound (`MAX_CONVERSATIONS`: memory store only) |
+| `CONVERSATION_STORE` | no | `memory` | `memory` (lost on restart) or `postgres` (`chat.conversations`; needs `DATABASE_URL` and `make migrate`) |
+| `CONVERSATION_RETENTION_DAYS` | no | `30` | Postgres history: conversations idle longer are deleted (swept at most hourly, after a write) |
 | `RAG_DOCS_DIR` | no | – | Enables the knowledge base: directory of `.md`/`.txt` documents (`/app/knowledge` in the image) |
 | `RAG_CACHE_FILE` | no | – | JSON file keeping document embeddings across restarts and reloads |
 | `RAG_TOP_K`, `RAG_MIN_SCORE`, `RAG_MAX_CONTEXT_CHARS` | no | `4`, `0.3`, `4000` | Chunks per turn, minimum cosine similarity (model-specific), excerpt budget |
 | `RAG_CHUNK_CHARS`, `RAG_CHUNK_OVERLAP` | no | `1200`, `200` | Chunk size; overlap when a long paragraph is cut |
 | `RAG_TIMEOUT_SECONDS` | no | `10` | Query embedding + search per turn |
 | `RAG_STORE` | no | `memory` | `memory` or `postgres` (persistent, hybrid search, uploads) |
-| `DATABASE_URL`, `DATABASE_POOL_SIZE` | with `postgres` | –, `5` | Postgres with the `rag` schema (`make migrate`) |
+| `DATABASE_URL`, `DATABASE_POOL_SIZE` | with either `postgres` | –, `5` | Postgres with the runtime's migrations (`make migrate`); one pool serves history and knowledge. The image ships Supabase's CA at `/etc/tatarbot/supabase-root-2021.crt` for `sslmode=verify-full` |
 | `RAG_KEYWORD_MIN_SCORE` | no | `0.25` | Trigram word similarity a keyword hit needs; `1` disables keyword search |
 | `RAG_S3_BUCKET`, `RAG_S3_PREFIX` | no | –, `rag/` | Enables uploads: private bucket and key prefix (credentials from the AWS chain) |
 | `RAG_SQS_QUEUE_URL` | with a bucket | – | Queue receiving the bucket's `ObjectCreated` events and reprocess requests |
@@ -224,8 +228,11 @@ are never returned to the caller.
 Qwen3 is a reasoning model. By default the runtime sends
 `chat_template_kwargs.enable_thinking=false` and strips any `<think>…</think>` from replies.
 
-History is kept in memory: the last `MAX_HISTORY_MESSAGES` messages are sent per turn, and
-everything is lost on restart. Turns within one conversation are serialized per process.
+The last `MAX_HISTORY_MESSAGES` messages are sent per turn. With the memory store,
+everything is lost on restart. With `CONVERSATION_STORE=postgres`, each conversation is one
+row (`chat.conversations`, JSONB message list, trimmed to `2 × MAX_HISTORY_MESSAGES`), each
+change locks the row, and a database outage degrades to no history instead of failing the
+turn. Turns within one conversation are also serialized per process.
 
 ## RAG database
 

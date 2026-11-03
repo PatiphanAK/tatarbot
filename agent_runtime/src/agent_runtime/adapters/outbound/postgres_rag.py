@@ -57,7 +57,7 @@ def create_pool(conninfo: str, max_size: int) -> AsyncConnectionPool:
         # Waiting for a connection; retrieval has its own, shorter, turn budget.
         timeout=10,
         kwargs={"prepare_threshold": None},
-        name="rag",
+        name="runtime",
     )
 
 

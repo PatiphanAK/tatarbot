@@ -226,37 +226,47 @@ and each one fails if its lock is removed.
 
 ### 8. Deployment
 
-Designed for AWS. `terraform plan` succeeds against the account, but the configuration
-**has not been applied**.
+**Target: GCP** ([`infra/gcp/`](infra/gcp/README.md), prepared, not applied). The AWS
+stack ([`infra/aws/`](infra/aws/README.md)) was applied on 2026-10-19 and stays until GCP
+is verified; then the library audio moves to GCS and AWS is destroyed
+([ADR 0003](docs/adr/0003-deploy-on-gcp.md)).
 
-* **ECS on one Graviton instance by default (t4g.micro, about $15/month 24/7).** The bot and
-  the runtime are separate ECS services, sharing the instance with bridge networking. The
-  bot calls the runtime's host port over the Docker bridge. `launch_type = "FARGATE"`
-  switches to one ARM64 task each, connected over Cloud Map private DNS, for about
-  $26.50/month. The bot runs exactly one task (`minimumHealthyPercent=0`,
-  `maximumPercent=100`): two bots on one token both answer every command. Costs,
-  assumptions and the start/stop schedule are in
-  [`infra/aws/`](infra/aws/README.md#cost-ap-southeast-1).
-* **SSM Parameter Store** (SecureString) for secrets, read by per-service execution roles.
-  The bot's only task role is scoped to its library prefix in S3.
-* **Supabase** (free tier, Singapore) for library metadata, through the Supavisor pooler in
-  session mode (sqlx uses prepared statements). The bot reads the library table every
-  6 hours, because Supabase pauses free projects without database activity.
-* **S3** for library audio (RustFS locally).
+* **Hybrid, all in asia-southeast1.** The bot runs 24/7 on one e2-micro VM
+  (Container-Optimized OS, systemd), because gateway, voice and playback need a long-lived
+  process. The runtime runs on **Cloud Run**: private (internal ingress + IAM), request-based
+  billing, scaling between 0 and 1 instances. About $9.40/month at catalog prices. The bot
+  runs exactly once: two bots on one token both answer every command.
+* **Bot → runtime auth:** the VM's host mints a Google ID token for the runtime's URL every
+  10 minutes. The bot reads it from a read-only file and sends it in
+  `X-Serverless-Authorization`, next to its `AGENT_API_KEY` bearer. The bot container is
+  blocked from the metadata server, so it never holds a service-account credential.
+* **Conversation history in Postgres** (`CONVERSATION_STORE=postgres`), so scaling to zero
+  and deploys lose nothing.
+* **Secret Manager** for secrets, readable per secret by the consuming service only.
+* **Supabase** (free tier, Singapore) for library metadata and history, through the
+  Supavisor pooler in session mode (sqlx uses prepared statements). The bot reads the
+  library table every 6 hours, because Supabase pauses free projects without database
+  activity.
+* **GCS** for library audio, reached by the unchanged S3 client through GCS's XML API with
+  an HMAC key (RustFS locally).
+* **Deploys** from GitHub Actions through Workload Identity Federation. Both images are
+  `linux/amd64` in Artifact Registry. The bot deploys with `deploy.sh` over IAP SSH, which
+  rolls back if it doesn't connect. The runtime deploys a new Cloud Run revision, which
+  gets traffic only once it starts.
 
-*Why EC2 by default:* for one small community, Fargate's per-task price plus one IPv4
-address per task costs about 75% more than one shared instance. The usual objections to
-EC2 are handled by ECS and the ASG:
-- **Patching:** applying a new ECS-optimized AMI replaces the instance.
-- **Access:** Session Manager, no SSH.
-- **Deploys:** the same image-swap workflow as Fargate.
-
-The price is availability: one instance is a single point of failure for both services.
-*Why not Lambda for the bot:* Songbird holds the gateway WebSocket and a UDP voice session
-for as long as music plays. *Why not SQLite (or SQLite on EFS):* task and instance disks
-are wiped on every deploy or replacement, and EFS adds cost, Terraform and locking
-caveats; Supabase's free Postgres is managed and survives deploys. *Why not EFS for audio:*
-S3 is cheaper, needs no mount, and presigned URLs let Songbird stream objects directly.
+*Why split:* the bot must stay connected, and the runtime is idle most of the time. A small
+VM is the cheapest always-on home for the bot, and ECS's job there (restart, image swap,
+rollback) is small enough for a systemd unit and a deploy script. Cloud Run bills the
+runtime only while a turn runs, and costs about $0.50 a month at this usage. The price is a
+cold start (estimated 2–5 s) on the first message after an idle period. *Why Singapore and not the free US e2-micro:* Supabase, the Qwen endpoint
+and the users are in Southeast Asia; every database query from Oregon would add a Pacific
+round trip. The VM is a single point of failure for the bot, as the single EC2 instance
+was on AWS.
+*Why not serverless for the bot:* Songbird holds the gateway WebSocket and a UDP voice session
+for as long as music plays. *Why not SQLite:* the VM's disk isn't backed up, and a
+persistent local database would tie the data to one machine; Supabase's free Postgres is
+managed and survives redeploys. *Why object storage for audio:* cheaper than disk, nothing
+to mount, and presigned URLs let Songbird stream objects directly.
 
 Design records: [ADR 0001](docs/adr/0001-inference-provider.md) and
 [cloud inference design](docs/architecture/cloud-inference.md). The knowledge base's

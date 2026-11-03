@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,16 +8,22 @@ use super::dto::{ChatRequestDto, ChatResponseDto, ErrorDto};
 use crate::application::ports::{AgentError, AgentPort};
 use crate::domain::{ChatRequest, ChatResponse};
 
+/// Cloud Run checks this header instead of `Authorization` when both are present, so
+/// the runtime's own bearer key keeps working behind IAM.
+const SERVERLESS_AUTHORIZATION: &str = "x-serverless-authorization";
+
 pub struct HttpAgentClient {
     http: reqwest::Client,
     chat_url: Url,
     api_key: Option<String>,
+    id_token_file: Option<PathBuf>,
 }
 
 impl HttpAgentClient {
     pub fn new(
         base_url: &Url,
         api_key: Option<String>,
+        id_token_file: Option<PathBuf>,
         timeout: Duration,
     ) -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()
@@ -34,19 +41,42 @@ impl HttpAgentClient {
             http,
             chat_url,
             api_key,
+            id_token_file,
         })
     }
 
-    fn chat_request(&self, request: &ChatRequest) -> reqwest::RequestBuilder {
-        let builder = self
+    async fn chat_request(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<reqwest::RequestBuilder, AgentError> {
+        let mut builder = self
             .http
             .post(self.chat_url.clone())
             .json(&ChatRequestDto::from(request));
-        match &self.api_key {
-            Some(key) => builder.bearer_auth(key),
-            None => builder,
+        if let Some(key) = &self.api_key {
+            builder = builder.bearer_auth(key);
         }
+        if let Some(path) = &self.id_token_file {
+            let token = read_id_token(path).await?;
+            builder = builder.header(SERVERLESS_AUTHORIZATION, format!("Bearer {token}"));
+        }
+        Ok(builder)
     }
+}
+
+/// The current ID token. A missing or empty file is an operator problem (the host's
+/// refresh timer), reported like an unreachable runtime.
+async fn read_id_token(path: &Path) -> Result<String, AgentError> {
+    let token = tokio::fs::read_to_string(path).await.map_err(|e| {
+        tracing::error!(path = %path.display(), error = %e, "cannot read the runtime ID token");
+        AgentError::Unavailable(format!("ID token unavailable: {e}"))
+    })?;
+    let token = token.trim();
+    if token.is_empty() || token.contains(char::is_whitespace) {
+        tracing::error!(path = %path.display(), "runtime ID token file is empty or malformed");
+        return Err(AgentError::Unavailable("ID token unavailable".to_owned()));
+    }
+    Ok(token.to_owned())
 }
 
 #[async_trait]
@@ -54,6 +84,7 @@ impl AgentPort for HttpAgentClient {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AgentError> {
         let response = self
             .chat_request(&request)
+            .await?
             .send()
             .await
             .map_err(map_transport_error)?;
@@ -88,7 +119,7 @@ fn map_status(status: StatusCode, body: &str) -> AgentError {
         StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => AgentError::Timeout,
         // A bad AGENT_API_KEY is an operator problem, not the user's fault.
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            tracing::error!(%status, %detail, "agent runtime rejected credentials; check AGENT_API_KEY");
+            tracing::error!(%status, %detail, "agent runtime rejected credentials; check AGENT_API_KEY and, on Cloud Run, the ID token and run.invoker");
             AgentError::Unavailable(detail)
         }
         StatusCode::TOO_MANY_REQUESTS => AgentError::Unavailable(detail),
@@ -104,21 +135,37 @@ mod tests {
     use crate::domain::ConversationId;
 
     fn client(base: &str, api_key: Option<&str>) -> HttpAgentClient {
+        client_with_token(base, api_key, None)
+    }
+
+    fn client_with_token(
+        base: &str,
+        api_key: Option<&str>,
+        id_token_file: Option<PathBuf>,
+    ) -> HttpAgentClient {
         HttpAgentClient::new(
             &Url::parse(base).unwrap(),
             api_key.map(str::to_owned),
+            id_token_file,
             Duration::from_secs(1),
         )
         .unwrap()
     }
 
-    fn auth_header(client: &HttpAgentClient) -> Option<String> {
+    async fn built(client: &HttpAgentClient) -> Result<reqwest::Request, AgentError> {
         let req = ChatRequest::new("hi", ConversationId::new("c1").unwrap()).unwrap();
-        let built = client.chat_request(&req).build().unwrap();
-        built
+        Ok(client.chat_request(&req).await?.build().unwrap())
+    }
+
+    fn header(request: &reqwest::Request, name: &str) -> Option<String> {
+        request
             .headers()
-            .get(reqwest::header::AUTHORIZATION)
+            .get(name)
             .map(|v| v.to_str().unwrap().to_owned())
+    }
+
+    async fn auth_header(client: &HttpAgentClient) -> Option<String> {
+        header(&built(client).await.unwrap(), "authorization")
     }
 
     #[test]
@@ -140,13 +187,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sends_bearer_token_only_when_configured() {
+    #[tokio::test]
+    async fn sends_bearer_token_only_when_configured() {
         assert_eq!(
-            auth_header(&client("http://agent", Some("secret"))).as_deref(),
+            auth_header(&client("http://agent", Some("secret")))
+                .await
+                .as_deref(),
             Some("Bearer secret")
         );
-        assert_eq!(auth_header(&client("http://agent", None)), None);
+        assert_eq!(auth_header(&client("http://agent", None)).await, None);
+    }
+
+    #[tokio::test]
+    async fn sends_id_token_beside_the_api_key_and_rereads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id-token");
+        std::fs::write(&path, "eyJ.first.sig\n").unwrap();
+        let client = client_with_token("https://rt.a.run.app", Some("key"), Some(path.clone()));
+
+        let request = built(&client).await.unwrap();
+        assert_eq!(
+            header(&request, SERVERLESS_AUTHORIZATION).as_deref(),
+            Some("Bearer eyJ.first.sig")
+        );
+        assert_eq!(
+            header(&request, "authorization").as_deref(),
+            Some("Bearer key")
+        );
+
+        // The host replaces the file (rename); the next request picks the new token up.
+        let next = dir.path().join("id-token.new");
+        std::fs::write(&next, "eyJ.second.sig").unwrap();
+        std::fs::rename(&next, &path).unwrap();
+        let request = built(&client).await.unwrap();
+        assert_eq!(
+            header(&request, SERVERLESS_AUTHORIZATION).as_deref(),
+            Some("Bearer eyJ.second.sig")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_or_empty_id_token_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = client_with_token("https://rt", None, Some(dir.path().join("nope")));
+        assert!(matches!(
+            built(&missing).await,
+            Err(AgentError::Unavailable(_))
+        ));
+
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, "  \n").unwrap();
+        let empty = client_with_token("https://rt", None, Some(empty));
+        assert!(matches!(
+            built(&empty).await,
+            Err(AgentError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_serverless_header_without_a_token_file() {
+        let request = built(&client("http://agent", Some("k"))).await.unwrap();
+        assert_eq!(header(&request, SERVERLESS_AUTHORIZATION), None);
     }
 
     #[test]

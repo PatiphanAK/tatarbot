@@ -16,6 +16,7 @@ from agent_runtime.adapters.outbound.hash_embeddings import HashEmbeddings
 from agent_runtime.adapters.outbound.memory_store import InMemoryConversationStore
 from agent_runtime.adapters.outbound.memory_vectors import InMemoryVectorStore
 from agent_runtime.adapters.outbound.openai_embeddings import OpenAIEmbeddings
+from agent_runtime.adapters.outbound.postgres_conversations import PostgresConversationStore
 from agent_runtime.adapters.outbound.postgres_rag import (
     PostgresDocumentRepository,
     PostgresVectorStore,
@@ -65,20 +66,33 @@ def create_app(
         search = TavilySearch(
             settings.tavily_api_key, timeout_seconds=settings.search_timeout_seconds
         )
-    store = store or InMemoryConversationStore(
-        max_messages_per_conversation=max(settings.max_history_messages * 2, 2),
-        max_conversations=settings.max_conversations,
+    # One pool for everything that uses Postgres (history, knowledge store).
+    pool = (
+        create_pool(settings.database_url, settings.database_pool_size)
+        if settings.database_needed
+        else None
     )
+    if store is None:
+        history_size = max(settings.max_history_messages * 2, 2)
+        if settings.conversation_store == "postgres":
+            store = PostgresConversationStore(
+                pool,
+                max_messages_per_conversation=history_size,
+                retention_days=settings.conversation_retention_days,
+            )
+        else:
+            store = InMemoryConversationStore(
+                max_messages_per_conversation=history_size,
+                max_conversations=settings.max_conversations,
+            )
     knowledge = None
     uploads = None
-    pool = None
     vectors: VectorStore | None = None
     if settings.knowledge_enabled:
         embedder = embedder or build_embedder(settings)
         if settings.rag_cache_file:
             embedder = CachedEmbeddings(embedder, settings.rag_cache_file)
         if settings.rag_store == "postgres":
-            pool = create_pool(settings.database_url, settings.database_pool_size)
             vectors = PostgresVectorStore(
                 pool,
                 embedder.identity,
@@ -123,17 +137,18 @@ def create_app(
     async def lifespan(_: FastAPI):
         log.info(
             "agent runtime started (model=%s, guardrails=%s, search=%s, knowledge=%s, "
-            "store=%s, uploads=%s)",
+            "store=%s, uploads=%s, history=%s)",
             settings.model_name,
             settings.guardrails_enabled,
             "tavily" if search else "off",
             knowledge.status.embedder if knowledge else "off",
             settings.rag_store if knowledge else "off",
             "on" if uploads else "off",
+            settings.conversation_store,
         )
         if pool:
             # Does not wait for a connection: a database outage leaves the runtime serving
-            # without knowledge, like an embedding outage.
+            # without knowledge or history, like an embedding outage.
             await pool.open(wait=False)
         # Indexing runs in the background: the API serves at once (without knowledge
         # until the index is built), and a cold embedding backend cannot block startup.

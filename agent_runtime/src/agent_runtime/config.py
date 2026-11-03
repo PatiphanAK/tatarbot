@@ -17,6 +17,8 @@ class ConfigError(Exception):
 EMBEDDING_PROVIDERS = ("openai", "hash")
 # RAG_STORE values: in-process memory, or Postgres + pgvector (persistent, uploads).
 RAG_STORES = ("memory", "postgres")
+# CONVERSATION_STORE values: in-process memory (lost on restart), or Postgres (chat schema).
+CONVERSATION_STORES = ("memory", "postgres")
 # rag.chunks.embedding is vector(1024) (BGE-M3). Another size needs a new migration and a
 # re-embed, never a silent change; the Postgres store also checks the live schema.
 RAG_SCHEMA_DIMENSIONS = 1024
@@ -44,6 +46,9 @@ class Settings:
     turn_timeout_seconds: float = 110.0
     max_history_messages: int = 20
     max_conversations: int = 10_000
+    # Where history lives. postgres keeps it across restarts and Cloud Run scale-to-zero.
+    conversation_store: str = "memory"
+    conversation_retention_days: int = 30
     # Knowledge base (RAG) is enabled when a documents directory is set or RAG_STORE is
     # postgres.
     rag_store: str = "memory"
@@ -90,7 +95,20 @@ class Settings:
     def uploads_enabled(self) -> bool:
         return self.rag_store == "postgres" and bool(self.rag_s3_bucket)
 
+    @property
+    def database_needed(self) -> bool:
+        return self.conversation_store == "postgres" or self.rag_store == "postgres"
+
     def __post_init__(self):
+        if self.conversation_store not in CONVERSATION_STORES:
+            raise ConfigError(f"CONVERSATION_STORE must be one of {', '.join(CONVERSATION_STORES)}")
+        if self.conversation_store == "postgres":
+            if not self.database_url:
+                raise ConfigError("DATABASE_URL is required when CONVERSATION_STORE=postgres")
+            if self.database_pool_size < 1:
+                raise ConfigError("DATABASE_POOL_SIZE must be at least 1")
+            if self.conversation_retention_days < 1:
+                raise ConfigError("CONVERSATION_RETENTION_DAYS must be at least 1")
         if self.rag_store not in RAG_STORES:
             raise ConfigError(f"RAG_STORE must be one of {', '.join(RAG_STORES)}")
         if self.rag_s3_bucket and self.rag_store != "postgres":
@@ -162,6 +180,8 @@ class Settings:
             turn_timeout_seconds=_parse("TURN_TIMEOUT_SECONDS", float, 110.0),
             max_history_messages=_parse("MAX_HISTORY_MESSAGES", int, 20),
             max_conversations=_parse("MAX_CONVERSATIONS", int, 10_000),
+            conversation_store=(_optional("CONVERSATION_STORE") or "memory").lower(),
+            conversation_retention_days=_parse("CONVERSATION_RETENTION_DAYS", int, 30),
             rag_store=(_optional("RAG_STORE") or "memory").lower(),
             rag_docs_dir=_optional("RAG_DOCS_DIR"),
             rag_cache_file=_optional("RAG_CACHE_FILE"),

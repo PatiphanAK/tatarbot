@@ -1,0 +1,26 @@
+# Manual deploy of the Discord bot to the GCP VM (systemd unit tatarbot-discord, infra/gcp/compute.tf).
+
+name: Deploy discord (GCP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch on main to deploy
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+
+# One deploy per service at a time; never cancel one halfway through a switch.
+concurrency:
+  group: deploy-gcp-tatarbot-discord
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy-gce.yml
+    with:
+      ref: ${{ inputs.ref }}

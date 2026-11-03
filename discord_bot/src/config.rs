@@ -102,6 +102,10 @@ pub struct AgentConfig {
     pub base_url: Url,
     /// Sent as `Authorization: Bearer <key>` when set.
     pub api_key: Option<String>,
+    /// File holding a Google-issued ID token for a private Cloud Run runtime, sent as
+    /// `X-Serverless-Authorization: Bearer <token>`. Re-read on every request: the host
+    /// refreshes it (infra/gcp), so the bot never holds a long-lived credential.
+    pub id_token_file: Option<std::path::PathBuf>,
     pub timeout: Duration,
 }
 
@@ -149,6 +153,7 @@ impl Config {
             agent: AgentConfig {
                 base_url,
                 api_key: optional("AGENT_API_KEY"),
+                id_token_file: optional("AGENT_ID_TOKEN_FILE").map(Into::into),
                 timeout: Duration::from_secs(timeout_secs),
             },
         })
@@ -169,6 +174,7 @@ impl fmt::Debug for AgentConfig {
         f.debug_struct("AgentConfig")
             .field("base_url", &self.base_url.as_str())
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("id_token_file", &self.id_token_file)
             .field("timeout", &self.timeout)
             .finish()
     }
@@ -223,6 +229,7 @@ mod tests {
         let agent = AgentConfig {
             base_url: Url::parse("http://agent").unwrap(),
             api_key: Some("super-secret".into()),
+            id_token_file: None,
             timeout: Duration::from_secs(1),
         };
         let discord = DiscordConfig {

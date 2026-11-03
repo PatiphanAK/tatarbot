@@ -1,5 +1,5 @@
 # Shared configuration: workflows, Compose files and Terraform. Runs only when they change.
-# Terraform is validated offline (no backend, no AWS credentials, no plan/apply).
+# Terraform is validated offline (no backend, no cloud credentials, no plan/apply).
 
 name: CI repo
 
@@ -43,11 +43,15 @@ jobs:
       - run: docker compose -f integration/compose.yaml config -q
 
   terraform:
-    name: terraform fmt + validate
+    name: terraform fmt + validate (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [infra/aws, infra/gcp]
     defaults:
       run:
-        working-directory: infra/aws
+        working-directory: ${{ matrix.dir }}
     steps:
       - uses: actions/checkout@v7
         with:

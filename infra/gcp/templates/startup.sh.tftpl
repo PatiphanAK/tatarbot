@@ -1,0 +1,246 @@
+#!/bin/bash
+# TatarBot host setup. Rendered by Terraform (infra/gcp/templates/startup.sh.tftpl) into the
+# VM's startup-script metadata. Container-Optimized OS runs it as root on every boot.
+#
+# COS keeps /etc stateless (rewritten every boot), so this script writes the units, helpers
+# and non-secret configuration each time. Only /var/lib/tatarbot is kept across reboots:
+# the deployed image reference per service, which deploy.sh writes.
+#
+#   /etc/tatarbot/<svc>.env           non-secret environment (from Terraform)
+#   /etc/tatarbot/<svc>.secrets       "ENV_NAME secret-id" lines (from Terraform)
+#   /run/tatarbot/<svc>.secrets.env   secret values, tmpfs, mode 600, refreshed on every start
+#   /var/lib/tatarbot/images/<svc>    image reference; the unit starts only once it exists
+#   /run/tatarbot/agent-token/id-token  ID token for the Cloud Run runtime, refreshed by a
+#                                       timer, readable by the bot's UID only (mounted ro)
+#
+# Containers can't reach the metadata server (iptables, DOCKER-USER), so they never get the
+# VM service account. The host fetches the secrets and the runtime's ID token with it.
+set -euo pipefail
+
+CONF=/etc/tatarbot
+STATE=/var/lib/tatarbot
+RUN=/run/tatarbot
+BRIDGE=br-tatarbot
+
+mkdir -p "$CONF" "$STATE/images" "$STATE/docker" "$RUN"
+chmod 700 "$STATE" "$RUN"
+
+# ---- Registry credentials: docker-credential-gcr (part of COS) uses the VM service account.
+cat > "$STATE/docker/config.json" <<'JSON'
+{ "credHelpers": { "${registry_host}": "gcr" } }
+JSON
+
+# ---- Docker network and the metadata block. The rules go in before any container starts.
+systemctl start docker
+docker network inspect tatarbot >/dev/null 2>&1 \
+  || docker network create --driver bridge --subnet "${docker_subnet}" \
+       -o com.docker.network.bridge.name="$BRIDGE" tatarbot
+
+cat > "$CONF/metadata-block.sh" <<'SH'
+#!/bin/bash
+# Check (-C) or insert (-I) the rules that keep containers away from 169.254.169.254.
+# DNS (port 53) stays open: Docker's embedded resolver forwards to the same address.
+set -euo pipefail
+op="$1"
+for proto in tcp udp; do
+  if [ "$proto" = tcp ]; then reject=tcp-reset; else reject=icmp-port-unreachable; fi
+  for iface in br-tatarbot docker0; do
+    rule=(DOCKER-USER -i "$iface" -d 169.254.169.254 -p "$proto" ! --dport 53 -j REJECT --reject-with "$reject")
+    if [ "$op" = "-I" ]; then
+      iptables -C "$${rule[@]}" 2>/dev/null || iptables -I "$${rule[@]}"
+    else
+      iptables -C "$${rule[@]}"
+    fi
+  done
+done
+SH
+bash "$CONF/metadata-block.sh" -I
+
+# ---- ID token for the Agent Runtime (Cloud Run, IAM-protected)
+# The VM's service account has run.invoker on that one service. The token is
+# audience-bound to the runtime's URL and lasts an hour; the timer refreshes it well before.
+cat > "$CONF/id-token.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+dir=/run/tatarbot/agent-token
+install -d -m 0750 -o root -g ${bot_uid} "$dir"
+token="$(curl -fsS --retry 5 --get -H 'Metadata-Flavor: Google' \
+  --data-urlencode 'audience=${id_token_audience}' --data 'format=full' \
+  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity')"
+case "$token" in
+  eyJ*.*.*) ;;
+  *) echo "unexpected identity token response" >&2; exit 1 ;;
+esac
+tmp="$(mktemp "$dir/.id-token.XXXXXX")"
+printf '%s' "$token" > "$tmp"
+chown root:${bot_uid} "$tmp"
+chmod 0640 "$tmp"
+mv "$tmp" "$dir/id-token"   # atomic: the bot never reads a half-written token
+SH
+
+cat > /etc/systemd/system/tatarbot-agent-token.service <<'UNIT'
+[Unit]
+Description=TatarBot: refresh the Agent Runtime ID token
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /etc/tatarbot/id-token.sh
+UNIT
+
+cat > /etc/systemd/system/tatarbot-agent-token.timer <<'UNIT'
+[Unit]
+Description=TatarBot: refresh the Agent Runtime ID token every ${id_token_refresh_minutes} min
+
+[Timer]
+OnActiveSec=0
+OnUnitActiveSec=${id_token_refresh_minutes}min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+# ---- Per-service helpers
+
+cat > "$CONF/prestart.sh" <<'SH'
+#!/bin/bash
+# ExecStartPre: refuse to start without the metadata block, refresh secrets, pull the image.
+set -euo pipefail
+svc="$1"
+CONF=/etc/tatarbot; STATE=/var/lib/tatarbot; RUN=/run/tatarbot
+export DOCKER_CONFIG="$STATE/docker"
+
+bash "$CONF/metadata-block.sh" -C || { echo "metadata block missing; not starting $svc" >&2; exit 1; }
+# Music works without the runtime, so a token failure doesn't block the start; chat then
+# reports the runtime as unavailable until the timer succeeds.
+bash "$CONF/id-token.sh" || echo "no ID token for the runtime yet; chat unavailable until the next refresh" >&2
+
+token="$(curl -fsS --retry 5 -H 'Metadata-Flavor: Google' \
+  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+  | sed -E 's/.*"access_token":"([^"]+)".*/\1/')"
+project="$(curl -fsS -H 'Metadata-Flavor: Google' \
+  'http://metadata.google.internal/computeMetadata/v1/project/project-id')"
+
+out="$RUN/$svc.secrets.env"
+tmp="$(mktemp "$RUN/.$svc.XXXXXX")"
+chmod 600 "$tmp"
+while read -r env_name secret_id; do
+  [ -n "$env_name" ] || continue
+  value="$(curl -fsS --retry 5 -H "Authorization: Bearer $token" \
+      "https://secretmanager.googleapis.com/v1/projects/$project/secrets/$secret_id/versions/latest:access" \
+    | tr -d '\n ' | sed -E 's/.*"data":"([^"]+)".*/\1/' | base64 -d)" \
+    || { echo "cannot read secret $secret_id (does it have a version?)" >&2; rm -f "$tmp"; exit 1; }
+  value="$(printf '%s' "$value" | sed -e 's/[[:space:]]*$//')"
+  case "$value" in *$'\n'*) echo "secret $secret_id spans lines; docker --env-file can't hold it" >&2; rm -f "$tmp"; exit 1 ;; esac
+  printf '%s=%s\n' "$env_name" "$value" >> "$tmp"
+done < "$CONF/$svc.secrets"
+mv "$tmp" "$out"
+
+docker pull --quiet "$(cat "$STATE/images/$svc")"
+docker rm -f "tatarbot-$svc" >/dev/null 2>&1 || true
+SH
+
+cat > "$CONF/deploy.sh" <<'SH'
+#!/bin/bash
+# Called by the deploy workflow over IAP SSH: sudo bash /etc/tatarbot/deploy.sh <svc> <image>
+# Switches the service to the image, waits until it is up, and rolls back if it isn't.
+set -euo pipefail
+svc="$1"; image="$2"
+STATE=/var/lib/tatarbot
+case "$svc" in discord) ;; *) echo "unknown service: $svc (the runtime deploys to Cloud Run)" >&2; exit 2 ;; esac
+[[ "$image" =~ ^${registry_prefix}/tatarbot-$svc:sha-[0-9a-f]{12}$ ]] \
+  || { echo "refusing image outside the registry: $image" >&2; exit 2; }
+[ -f "/etc/systemd/system/tatarbot-$svc.service" ] \
+  || { echo "tatarbot-$svc is disabled in Terraform ($${svc}_enabled = false)" >&2; exit 2; }
+
+previous="$(cat "$STATE/images/$svc" 2>/dev/null || true)"
+
+switch_to() {
+  printf '%s\n' "$1" > "$STATE/images/$svc.new"
+  mv "$STATE/images/$svc.new" "$STATE/images/$svc"
+  systemctl reset-failed "tatarbot-$svc" 2>/dev/null || true
+  # A failed pull or secret read fails the restart; wait_up then fails and we roll back.
+  systemctl restart "tatarbot-$svc" || echo "restart of tatarbot-$svc failed" >&2
+}
+
+# Up = the bot logged in to the Discord gateway.
+wait_up() {
+  local id
+  for _ in $(seq 1 36); do
+    sleep 5
+    id="$(docker inspect -f '{{.Id}}' "tatarbot-$svc" 2>/dev/null)" || continue
+    docker logs "$id" 2>&1 | grep -q 'connected to Discord' && return 0
+  done
+  return 1
+}
+
+echo "deploying $image (was: $${previous:-nothing})"
+switch_to "$image"
+if wait_up; then
+  echo "tatarbot-$svc is up on $image"
+  exit 0
+fi
+
+echo "tatarbot-$svc did not come up; recent logs:" >&2
+docker logs --tail 50 "tatarbot-$svc" >&2 2>&1 || journalctl -u "tatarbot-$svc" -n 50 --no-pager >&2
+if [ -n "$previous" ]; then
+  echo "rolling back to $previous" >&2
+  switch_to "$previous"
+fi
+exit 1
+SH
+
+# ---- Service configuration and units
+%{ for svc, s in services ~}
+
+# tatarbot-${svc}
+cat > "$CONF/${svc}.env" <<'ENV'
+${s.env}
+ENV
+cat > "$CONF/${svc}.secrets" <<'SECRETS'
+${s.secrets}
+SECRETS
+%{ if s.enabled ~}
+cat > /etc/systemd/system/tatarbot-${svc}.service <<'UNIT'
+[Unit]
+Description=TatarBot ${svc}
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+# Nothing to run until the first deploy writes the image reference.
+ConditionPathExists=/var/lib/tatarbot/images/${svc}
+
+[Service]
+Environment=DOCKER_CONFIG=/var/lib/tatarbot/docker
+ExecStartPre=/bin/bash /etc/tatarbot/prestart.sh ${svc}
+# "$$" is a literal "$" for systemd, so bash sees "$(cat ...)" and reads the image at each start.
+ExecStart=/bin/bash -c 'exec /usr/bin/docker run --rm --name tatarbot-${svc} \
+  --network tatarbot --read-only --memory ${s.memory_mb}m --memory-swap ${s.memory_mb}m \
+  --stop-timeout ${s.stop_timeout} --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+  --env-file /etc/tatarbot/${svc}.env --env-file /run/tatarbot/${svc}.secrets.env \
+  ${s.docker_args} "$$(cat /var/lib/tatarbot/images/${svc})"'
+ExecStop=/usr/bin/docker stop -t ${s.stop_timeout} tatarbot-${svc}
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=${s.stop_timeout + 15}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+%{ else ~}
+rm -f /etc/systemd/system/tatarbot-${svc}.service
+docker rm -f tatarbot-${svc} >/dev/null 2>&1 || true
+%{ endif ~}
+%{ endfor ~}
+
+systemctl daemon-reload
+systemctl enable --now tatarbot-agent-token.timer
+%{ for svc, s in services ~}
+%{ if s.enabled ~}
+systemctl enable tatarbot-${svc}.service
+systemctl restart tatarbot-${svc}.service || echo "tatarbot-${svc} not started (not deployed yet, or failed: journalctl -u tatarbot-${svc})"
+%{ endif ~}
+%{ endfor ~}

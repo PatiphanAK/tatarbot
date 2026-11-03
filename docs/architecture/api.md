@@ -14,7 +14,10 @@ runtime also serves its OpenAPI schema at `/docs` and `/openapi.json`.
 ## Conventions
 
 * **Auth:** every `/v1/*` route requires `Authorization: Bearer <AGENT_API_KEY>`, compared
-  in constant time. `/health` and `/ready` are open. There is one key and no roles; see
+  in constant time. On GCP the runtime is a private Cloud Run service: Cloud Run first
+  checks a Google ID token in `X-Serverless-Authorization` (the bot sends it when
+  `AGENT_ID_TOKEN_FILE` is set) against `roles/run.invoker`, then passes the request on, so
+  both checks apply. `/health` and `/ready` are open. There is one key and no roles; see
   [security.md](../security.md#access-control).
 * **Errors:** always `{"error": "<fixed message>"}`. Validation errors list the failing
   fields; nothing from upstream bodies, URLs or credentials is returned.
@@ -65,7 +68,8 @@ runtime also serves its OpenAPI schema at `/docs` and `/openapi.json`.
 }
 ```
 
-* `conversation_id` keys the history (in memory, per runtime process). The bot builds it as
+* `conversation_id` keys the history (in memory per process, or in Postgres with
+  `CONVERSATION_STORE=postgres`). The bot builds it as
   `discord:<guild id | dm>:<channel id>:<user id>`, so each user has their own conversation
   per channel. The runtime also derives the knowledge namespaces from it (`global`, plus
   `discord:<guild id>` in a server).

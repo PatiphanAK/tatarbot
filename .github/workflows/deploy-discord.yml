@@ -1,7 +1,8 @@
 # Manual deploy of the Discord bot to ECS service tatarbot-discord.
-# Not triggered automatically until the AWS infrastructure exists (infra/aws).
+# AWS (infra/aws, linux/arm64). Superseded by deploy-gcp-discord.yml; removed with the AWS
+# teardown (infra/gcp/README.md#migration-from-aws).
 
-name: Deploy discord
+name: Deploy discord (AWS)
 
 on:
   workflow_dispatch:

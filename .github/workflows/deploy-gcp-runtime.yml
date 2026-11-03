@@ -1,0 +1,26 @@
+# Manual deploy of the Agent Runtime to its Cloud Run service (infra/gcp/cloudrun.tf).
+
+name: Deploy runtime (GCP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch on main to deploy
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  id-token: write
+
+# One deploy at a time; never cancel one halfway through.
+concurrency:
+  group: deploy-gcp-tatarbot-runtime
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy-cloudrun.yml
+    with:
+      ref: ${{ inputs.ref }}

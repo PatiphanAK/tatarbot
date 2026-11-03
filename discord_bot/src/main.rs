@@ -42,6 +42,7 @@ async fn main() -> Result<(), AppError> {
     let agent = HttpAgentClient::new(
         &config.agent.base_url,
         config.agent.api_key.clone(),
+        config.agent.id_token_file.clone(),
         config.agent.timeout,
     )?;
     let chat: Arc<dyn ChatService> = Arc::new(ChatUseCase::new(agent));
