@@ -481,22 +481,6 @@ mod tests {
         )
         .unwrap();
 
-        let probe_args: Vec<String> = [
-            "-v",
-            "error",
-            "-protocol_whitelist",
-            "file",
-            "-format_whitelist",
-            FORMAT_WHITELIST,
-            "-show_entries",
-            "format=duration:stream=codec_type",
-            "-of",
-            "json",
-        ]
-        .into_iter()
-        .map(String::from)
-        .chain([file_arg(&input)])
-        .collect();
         let out = dir.path().join("o.ogg");
         let transcode_args: Vec<String> = [
             "-nostdin",
@@ -551,89 +535,119 @@ mod tests {
         .chain([file_arg(&out)])
         .collect();
 
-        // (label, AS, CPU, FSIZE); None = leave the runner's limit.
-        type L = (Option<u64>, Option<u64>, Option<u64>);
-        let probe_cases: Vec<(&str, L)> = vec![
-            ("no limits", (None, None, None)),
-            ("AS 512M only", (Some(512 * MIB), None, None)),
-            ("CPU 20s only", (None, Some(20), None)),
-            ("FSIZE 0 only", (None, None, Some(0))),
-            ("all (production)", (Some(512 * MIB), Some(20), Some(0))),
-            ("all, AS 1G", (Some(1024 * MIB), Some(20), Some(0))),
-            ("all, AS 2G", (Some(2048 * MIB), Some(20), Some(0))),
-            ("all, AS 4G", (Some(4096 * MIB), Some(20), Some(0))),
-            ("all, AS 8G", (Some(8192 * MIB), Some(20), Some(0))),
-        ];
-        let transcode_cases: Vec<(&str, L)> = vec![
-            ("no limits", (None, None, None)),
-            ("AS 512M only", (Some(512 * MIB), None, None)),
-            ("CPU 240s only", (None, Some(240), None)),
-            ("FSIZE 64M only", (None, None, Some(64 * MIB))),
-            (
-                "all (production)",
-                (Some(512 * MIB), Some(240), Some(64 * MIB)),
-            ),
-            ("all, AS 2G", (Some(2048 * MIB), Some(240), Some(64 * MIB))),
-        ];
+        writeln!(
+            report,
+            "runner /proc/self/limits:\n{}",
+            sh("grep -E 'stack|address|processes|open files' /proc/self/limits")
+        )
+        .unwrap();
+        writeln!(report, "glibc: {}", sh("ldd --version | head -1")).unwrap();
 
-        let run = |program: &str, args: &[String], clear_env: bool, (mem, cpu, fsize): L| {
-            let mut c = std::process::Command::new(program);
-            c.args(args).stdin(Stdio::null());
-            if clear_env {
-                c.env_clear();
-            }
+        // Round 2: the transcode fails only under RLIMIT_AS 512M with pthread_create EAGAIN.
+        // Which address-space consumer: thread stacks (sized from RLIMIT_STACK), malloc arenas,
+        // or something else? Production limits plus one change each; env_clear as in prod.
+        const PROD: (u64, u64, u64) = (512 * MIB, 240, 64 * MIB);
+        // (label, AS, extra RLIMIT_STACK, extra env)
+        type Case<'a> = (&'a str, u64, Option<u64>, Vec<(&'a str, &'a str)>);
+        let cases: Vec<Case> = vec![
+            ("production", PROD.0, None, vec![]),
+            ("+ STACK 8M", PROD.0, Some(8 * MIB), vec![]),
+            ("+ STACK 2M", PROD.0, Some(2 * MIB), vec![]),
+            (
+                "+ MALLOC_ARENA_MAX=1",
+                PROD.0,
+                None,
+                vec![("MALLOC_ARENA_MAX", "1")],
+            ),
+            (
+                "+ MALLOC_ARENA_MAX=2",
+                PROD.0,
+                None,
+                vec![("MALLOC_ARENA_MAX", "2")],
+            ),
+            ("AS 640M", 640 * MIB, None, vec![]),
+            ("AS 768M", 768 * MIB, None, vec![]),
+            ("AS 1G", 1024 * MIB, None, vec![]),
+            ("AS 1.5G", 1536 * MIB, None, vec![]),
+        ];
+        for (label, mem, stack, env) in &cases {
+            let (mem, stack) = (*mem, *stack);
+            let mut c = std::process::Command::new("ffmpeg");
+            c.args(&transcode_args)
+                .stdin(Stdio::null())
+                .env_clear()
+                .envs(env.iter().copied());
             unsafe {
                 c.pre_exec(move || {
-                    for (res, v) in [
+                    let mut set = vec![
                         (libc::RLIMIT_AS, mem),
-                        (libc::RLIMIT_CPU, cpu),
-                        (libc::RLIMIT_FSIZE, fsize),
-                    ] {
-                        if let Some(v) = v {
-                            let l = libc::rlimit {
-                                rlim_cur: v as libc::rlim_t,
-                                rlim_max: v as libc::rlim_t,
-                            };
-                            if libc::setrlimit(res, &l) != 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
+                        (libc::RLIMIT_CPU, PROD.1),
+                        (libc::RLIMIT_FSIZE, PROD.2),
+                    ];
+                    if let Some(st) = stack {
+                        set.push((libc::RLIMIT_STACK, st));
+                    }
+                    for (res, v) in set {
+                        let l = libc::rlimit {
+                            rlim_cur: v as libc::rlim_t,
+                            rlim_max: v as libc::rlim_t,
+                        };
+                        if libc::setrlimit(res, &l) != 0 {
+                            return Err(std::io::Error::last_os_error());
                         }
                     }
                     Ok(())
                 });
             }
-            match c.output() {
+            let r = match c.output() {
                 Ok(o) => format!(
-                    "{} | stderr: {}",
+                    "{} | {}",
                     describe_exit(&o.status),
                     String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
                         .chars()
-                        .take(300)
+                        .take(160)
                         .collect::<String>()
-                        .replace('\n', " / ")
                 ),
                 Err(e) => format!("spawn error: {e}"),
-            }
-        };
-
-        for clear_env in [false, true] {
-            for (label, l) in &probe_cases {
-                let r = run("ffprobe", &probe_args, clear_env, *l);
-                writeln!(
-                    report,
-                    "probe     env_clear={clear_env:<5} {label:<18} -> {r}"
-                )
-                .unwrap();
-            }
-            for (label, l) in &transcode_cases {
-                let r = run("ffmpeg", &transcode_args, clear_env, *l);
-                writeln!(
-                    report,
-                    "transcode env_clear={clear_env:<5} {label:<18} -> {r}"
-                )
-                .unwrap();
-            }
+            };
+            writeln!(report, "transcode {label:<22} -> {r}").unwrap();
         }
+
+        // Threads and peak address space of an unlimited transcode (sampled from /proc).
+        let mut child = std::process::Command::new("ffmpeg")
+            .args(&transcode_args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .env_clear()
+            .spawn()
+            .unwrap();
+        let (mut max_threads, mut vm_peak) = (0u64, String::new());
+        let status_path = format!("/proc/{}/status", child.id());
+        loop {
+            if let Ok(st) = std::fs::read_to_string(&status_path) {
+                for line in st.lines() {
+                    if let Some(v) = line.strip_prefix("Threads:") {
+                        max_threads = max_threads.max(v.trim().parse().unwrap_or(0));
+                    }
+                    if line.starts_with("VmPeak:") {
+                        vm_peak = line.to_owned();
+                    }
+                }
+            }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        writeln!(
+            report,
+            "unlimited transcode: max threads seen {max_threads}, last {vm_peak}"
+        )
+        .unwrap();
+
         panic!("diagnostic report (intentional failure):\n{report}");
     }
 
