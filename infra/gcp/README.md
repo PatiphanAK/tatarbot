@@ -214,6 +214,45 @@ With the runtime off the VM, the bot has the e2-micro to itself, so `discord_mem
 go up to about 650 if playing needs it. Use `machine_type = "e2-small"` only if the
 measurement says so.
 
+## Daily schedule (optional)
+
+`vm_schedule` (`schedule.tf`) starts and stops the bot VM every day with a Compute Engine
+instance schedule. The runtime and the ingest worker don't need one: they are on Cloud Run
+and scale to zero. Example: online 13:00–24:00 Bangkok:
+
+```hcl
+vm_schedule = { start = "45 12 * * *", stop = "0 0 * * *", time_zone = "Asia/Bangkok" }
+```
+
+* **Timing:** Google may begin a start or stop up to 15 minutes late, so the start is 15
+  minutes early. Start and stop must be at least 15 minutes apart.
+* **Permissions:** the Compute Engine service agent
+  (`service-<project number>@compute-system.iam.gserviceaccount.com`) gets a custom role with
+  only `compute.instances.start` and `compute.instances.stop`.
+* **Stop:** a normal guest shutdown.
+  1. systemd stops `tatarbot-discord` before Docker.
+  2. `docker stop -t 30` sends SIGTERM.
+  3. The bot leaves its voice channels (playback stops cleanly) and closes the gateway, each
+     step bounded at 5 s, within the unit's 45 s stop timeout.
+* **Start:** a normal boot. The startup script re-adds the metadata block, rewrites the
+  units, mints the tokens and starts the bot with the image recorded on the stateful disk.
+  Nothing is redeployed.
+* **The external IP is ephemeral and changes on every start.** Nothing depends on it:
+  * the runtime and worker are reached by URL with ID tokens (internal ingress is decided by
+    VPC identity, not IP);
+  * GCS uses tokens;
+  * deploys use IAP SSH by instance name;
+  * the firewall only admits IAP;
+  * there are no IP conditions in IAM.
+
+  Keep it that way: don't turn on IP allowlists at Supabase or the model provider, or use a
+  static IP if you ever must (billed even while stopped).
+* **While stopped:**
+  * slash commands show "application did not respond" and the bot appears offline;
+  * deploys fail, because IAP needs a running VM, so deploy during online hours;
+  * ingest results wait in the outbox and are posted after the next start (or in the channel
+    once the interaction token has expired).
+
 ## Cost (asia-southeast1)
 
 Unit prices come from the **Cloud Billing Catalog API** (pulled on 2026-11-03, USD,

@@ -16,3 +16,11 @@ music_library_enabled = true
 # Billing account for the budget alert (gcloud billing accounts list). Empty skips it.
 billing_account = ""
 budget_amount   = 20
+
+# Optional daily VM schedule (default: 24/7). Google may begin a start or stop up to 15
+# minutes late: schedule the start 15 minutes early.
+# vm_schedule = {
+#   start     = "45 12 * * *"
+#   stop      = "0 0 * * *"
+#   time_zone = "Asia/Bangkok"
+# }
