@@ -10,9 +10,11 @@
 #   /etc/tatarbot/<svc>.secrets       "ENV_NAME secret-id" lines (from Terraform)
 #   /run/tatarbot/<svc>.secrets.env   secret values, tmpfs, mode 600, refreshed on every start
 #   /var/lib/tatarbot/images/<svc>    image reference; the unit starts only once it exists
+#   /run/tatarbot/agent-token/id-token  ID token for the Cloud Run runtime, refreshed by a
+#                                       timer, readable by the bot's UID only (mounted ro)
 #
 # Containers can't reach the metadata server (iptables, DOCKER-USER), so they never get the
-# VM service account. The host fetches the secrets with it instead.
+# VM service account. The host fetches the secrets and the runtime's ID token with it.
 set -euo pipefail
 
 CONF=/etc/tatarbot
@@ -54,6 +56,52 @@ done
 SH
 bash "$CONF/metadata-block.sh" -I
 
+# ---- ID token for the Agent Runtime (Cloud Run, IAM-protected)
+# The VM's service account has run.invoker on that one service. The token is
+# audience-bound to the runtime's URL and lasts an hour; the timer refreshes it well before.
+cat > "$CONF/id-token.sh" <<'SH'
+#!/bin/bash
+set -euo pipefail
+dir=/run/tatarbot/agent-token
+install -d -m 0750 -o root -g ${bot_uid} "$dir"
+token="$(curl -fsS --retry 5 --get -H 'Metadata-Flavor: Google' \
+  --data-urlencode 'audience=${id_token_audience}' --data 'format=full' \
+  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity')"
+case "$token" in
+  eyJ*.*.*) ;;
+  *) echo "unexpected identity token response" >&2; exit 1 ;;
+esac
+tmp="$(mktemp "$dir/.id-token.XXXXXX")"
+printf '%s' "$token" > "$tmp"
+chown root:${bot_uid} "$tmp"
+chmod 0640 "$tmp"
+mv "$tmp" "$dir/id-token"   # atomic: the bot never reads a half-written token
+SH
+
+cat > /etc/systemd/system/tatarbot-agent-token.service <<'UNIT'
+[Unit]
+Description=TatarBot: refresh the Agent Runtime ID token
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /etc/tatarbot/id-token.sh
+UNIT
+
+cat > /etc/systemd/system/tatarbot-agent-token.timer <<'UNIT'
+[Unit]
+Description=TatarBot: refresh the Agent Runtime ID token every ${id_token_refresh_minutes} min
+
+[Timer]
+OnActiveSec=0
+OnUnitActiveSec=${id_token_refresh_minutes}min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 # ---- Per-service helpers
 
 cat > "$CONF/prestart.sh" <<'SH'
@@ -65,6 +113,9 @@ CONF=/etc/tatarbot; STATE=/var/lib/tatarbot; RUN=/run/tatarbot
 export DOCKER_CONFIG="$STATE/docker"
 
 bash "$CONF/metadata-block.sh" -C || { echo "metadata block missing; not starting $svc" >&2; exit 1; }
+# Music works without the runtime, so a token failure doesn't block the start; chat then
+# reports the runtime as unavailable until the timer succeeds.
+bash "$CONF/id-token.sh" || echo "no ID token for the runtime yet; chat unavailable until the next refresh" >&2
 
 token="$(curl -fsS --retry 5 -H 'Metadata-Flavor: Google' \
   'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
@@ -98,7 +149,7 @@ cat > "$CONF/deploy.sh" <<'SH'
 set -euo pipefail
 svc="$1"; image="$2"
 STATE=/var/lib/tatarbot
-case "$svc" in runtime|discord) ;; *) echo "unknown service: $svc" >&2; exit 2 ;; esac
+case "$svc" in discord) ;; *) echo "unknown service: $svc (the runtime deploys to Cloud Run)" >&2; exit 2 ;; esac
 [[ "$image" =~ ^${registry_prefix}/tatarbot-$svc:sha-[0-9a-f]{12}$ ]] \
   || { echo "refusing image outside the registry: $image" >&2; exit 2; }
 [ -f "/etc/systemd/system/tatarbot-$svc.service" ] \
@@ -114,18 +165,13 @@ switch_to() {
   systemctl restart "tatarbot-$svc" || echo "restart of tatarbot-$svc failed" >&2
 }
 
-# Up = runtime reports healthy (image HEALTHCHECK on /health); bot logged in to the gateway.
+# Up = the bot logged in to the Discord gateway.
 wait_up() {
-  local id status
+  local id
   for _ in $(seq 1 36); do
     sleep 5
     id="$(docker inspect -f '{{.Id}}' "tatarbot-$svc" 2>/dev/null)" || continue
-    if [ "$svc" = runtime ]; then
-      status="$(docker inspect -f '{{.State.Health.Status}}' "$id")"
-      [ "$status" = healthy ] && return 0
-    else
-      docker logs "$id" 2>&1 | grep -q 'connected to Discord' && return 0
-    fi
+    docker logs "$id" 2>&1 | grep -q 'connected to Discord' && return 0
   done
   return 1
 }
@@ -191,6 +237,7 @@ docker rm -f tatarbot-${svc} >/dev/null 2>&1 || true
 %{ endfor ~}
 
 systemctl daemon-reload
+systemctl enable --now tatarbot-agent-token.timer
 %{ for svc, s in services ~}
 %{ if s.enabled ~}
 systemctl enable tatarbot-${svc}.service

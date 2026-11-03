@@ -8,12 +8,12 @@ described in detail. It covers what exists. Items marked *planned* are designed,
 ```mermaid
 flowchart LR
     users([Discord users]) -->|"untrusted text,<br/>attachments, links"| bot
-    subgraph aws["AWS account (Terraform, not applied)"]
-        bot[discord_bot]
-        rt[agent_runtime]
+    subgraph gcp["GCP project (Terraform in infra/gcp, not applied)"]
+        bot["discord_bot<br/>(GCE VM)"]
+        rt["agent_runtime<br/>(Cloud Run, private)"]
         worker["ingestion worker<br/>(planned deployment)"]
     end
-    bot -->|"bearer AGENT_API_KEY"| rt
+    bot -->|"ID token (run.invoker)<br/>+ bearer AGENT_API_KEY"| rt
     rt -->|"bearer MODEL_API_KEY"| model[(model provider)]
     rt -->|"API key"| tavily[(Tavily)]
     rt -->|"untrusted results"| model
@@ -21,7 +21,7 @@ flowchart LR
     bot --> pg[(Supabase Postgres)]
     rt --> pg
     worker --> pg
-    bot --> s3m[(S3 music prefix)]
+    bot -->|"HMAC key"| s3m[(GCS music bucket)]
     rt -->|"presigned POST"| s3r[(S3 RAG prefix)]
     s3r --> sqs[(SQS)] --> worker
 ```
@@ -42,7 +42,8 @@ flowchart LR
 | Any member who can mention the bot | chat; control music through chat within the music rules | Discord; `MusicUseCase` |
 | Member in the bot's voice channel | play, skip, stop, queue | `MusicUseCase` (`discord_bot/src/application/use_cases/music.rs`) |
 | Role `MUSIC_UPLOAD_ROLE` (default `DJ`) or Manage Server | upload, delete others' tracks | `discord_bot` library commands |
-| Holder of `AGENT_API_KEY` (the bot, operators) | every runtime `/v1/*` route, including knowledge uploads and deletes in **any** namespace | `http_api.py` bearer check |
+| Holder of `AGENT_API_KEY` (the bot, operators) | every runtime `/v1/*` route, including knowledge uploads and deletes in **any** namespace | `http_api.py` bearer check; on GCP also Cloud Run IAM (below) |
+| The VM's service account (GCP) | invoke the Cloud Run runtime (`roles/run.invoker` on that service); nobody else can reach it | Cloud Run IAM + internal ingress (`infra/gcp/cloudrun.tf`) |
 | A chat turn | read knowledge from `global` and its own server's namespace only | namespaces derived from `conversation_id` on the server (`domain/ingestion.py`, `retrieval_namespaces`) |
 
 The runtime has no per-user identity. Any future bot command that manages knowledge
@@ -54,11 +55,14 @@ their server retrieves.
 
 * Never in the repository, images, Terraform variables or state. Locally they live in
   git-ignored `.env` files (the runtime's `make env` creates its file with mode 600; the
-  bot's copies `.env.example` as is, so restrict it yourself). In ECS they come from SSM Parameter
-  Store SecureStrings, injected at task start and readable only by that service's execution
-  role ([infra/aws/README.md](../infra/aws/README.md#security-notes)).
-* AWS access from code uses the default credential chain (task roles); no access keys in
-  configuration. Deploys use GitHub OIDC, no stored keys.
+  bot's copies `.env.example` as is, so restrict it yourself). On GCP they live in Secret
+  Manager, readable per secret by the consuming service's identity only: the VM's host
+  writes the bot's to tmpfs at each start, Cloud Run injects the runtime's at instance start
+  ([infra/gcp/README.md](../infra/gcp/README.md#identity-secrets-and-the-metadata-server)).
+* The bot calls the runtime with a Google ID token that the host mints and refreshes; the
+  bot container never holds a service-account credential (it can't reach the metadata
+  server). The one long-lived credential is the music bucket's HMAC key (one bucket only).
+  Deploys use Workload Identity Federation, no stored keys.
 * The runtime sends `MODEL_API_KEY` to the embedding server only when the embedding URL is
   defaulted to the model's: a key never goes to a host it wasn't configured for
   (`config.py`, `_embedding_from_env`).
@@ -67,25 +71,30 @@ their server retrieves.
 
 ## Network
 
-* No inbound internet access to either service: no security group admits it, no SSH
-  (Session Manager instead). The runtime is reachable only from the bot (Docker bridge on
-  EC2, security-group-to-security-group on Fargate).
-* Containers can't reach the instance role (IMDSv2, hop limit 1).
+* No inbound internet access to either service. The VM's firewall admits only IAP's range
+  on port 22 (OS Login). The runtime's Cloud Run ingress is internal (this project's VPC)
+  and invocation requires IAM, granted to the VM's identity only.
+* The bot container can't reach the metadata server (iptables `DOCKER-USER` rules; the unit
+  refuses to start without them), so it never gets the VM's service account.
 * TLS to Supabase is verified against its root CA (`sslmode=verify-full`).
 
 ## IAM (least privilege)
 
-| Role | Permissions | Status |
-|---|---|---|
-| Execution roles (per service) | own ECR repo, own log group, own SSM parameters | Terraform, not applied |
-| Bot task role | get/put/delete/list under the music prefix | Terraform, not applied |
-| GitHub deploy role | ECR push, task definitions, service update; assumable only from the `production` environment | Terraform, not applied |
-| Runtime task role (uploads) | `s3:PutObject`, `s3:DeleteObject` on the RAG prefix, `sqs:SendMessage` | *planned* ([rag.md §7.6](architecture/rag.md#76-deployment-requirements-not-built-yet)) |
-| Worker task role | `s3:GetObject` on the RAG prefix, receive/delete/change-visibility on the queue | *planned* |
+GCP (`infra/gcp`, not applied); the full table is in
+[infra/gcp/README.md](../infra/gcp/README.md#identity-secrets-and-the-metadata-server).
+
+| Identity | Permissions |
+|---|---|
+| `tatarbot-vm` (host only) | pull the bot image, read the bot's secrets, `run.invoker` on the runtime service, write logs and metrics |
+| `tatarbot-runtime` (Cloud Run) | read the runtime's secrets |
+| `tatarbot-music` (HMAC key) | object user on the music bucket |
+| `tatarbot-deploy` (GitHub, `production` environment only) | push both images; OS Login with sudo and IAP on the VM; `run.developer` on the runtime service and actAs its identity |
+| Upload and worker identities | *planned* ([rag.md §7.6](architecture/rag.md#76-deployment-requirements-not-built-yet)) |
 
 ## Containers
 
 Both images run as non-root users with no secrets baked in. The bot's image is distroless
-(no shell) with a read-only root filesystem in ECS (`/tmp` is a scratch volume). The
+(no shell) with a read-only root filesystem on the VM (`/tmp` is a scratch volume, the ID
+token a read-only mount). The
 runtime's is `python:3.12-slim` with a virtualenv.
 

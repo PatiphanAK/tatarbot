@@ -1,9 +1,14 @@
 # Service accounts and Workload Identity Federation.
 #
-# * tatarbot-vm: the VM's identity. Pulls its two images, reads its secrets, writes logs and
-#   metrics. Containers can't use it (metadata server blocked, templates/startup.sh.tftpl).
+# * tatarbot-vm: the VM's identity. Pulls the bot image, reads the bot's secrets, mints ID
+#   tokens for the runtime (run.invoker on that one service), writes logs and metrics. The
+#   bot container can't use it (metadata server blocked, templates/startup.sh.tftpl); it
+#   only ever sees an ID token whose audience is the runtime's URL.
+# * tatarbot-runtime (cloudrun.tf): the Cloud Run service's identity. Reads the runtime's
+#   secrets, nothing else.
 # * tatarbot-deploy: assumed by GitHub Actions through WIF, only from the production
-#   environment of this repository. Pushes images and runs deploy.sh on the VM over IAP SSH.
+#   environment of this repository. Pushes images, runs deploy.sh on the VM over IAP SSH,
+#   and rolls new revisions of the runtime service.
 # * tatarbot-music (storage.tf): owns the HMAC key for the bucket.
 
 data "google_project" "current" {
@@ -29,11 +34,10 @@ resource "google_project_iam_member" "vm" {
   member  = google_service_account.vm.member
 }
 
+# Only the bot's repository; Cloud Run pulls the runtime image with its own service agent.
 resource "google_artifact_registry_repository_iam_member" "vm_pull" {
-  for_each = google_artifact_registry_repository.service
-
-  location   = each.value.location
-  repository = each.value.name
+  location   = google_artifact_registry_repository.service["discord"].location
+  repository = google_artifact_registry_repository.service["discord"].name
   role       = "roles/artifactregistry.reader"
   member     = google_service_account.vm.member
 }
@@ -123,6 +127,21 @@ resource "google_iap_tunnel_instance_iam_member" "deploy" {
 # OS Login on a VM that has a service account requires actAs on that account.
 resource "google_service_account_iam_member" "deploy_act_as_vm" {
   service_account_id = google_service_account.vm.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = google_service_account.deploy.member
+}
+
+# Roll new runtime revisions (gcloud run services update --image) on this service only.
+resource "google_cloud_run_v2_service_iam_member" "deploy_runtime" {
+  name     = google_cloud_run_v2_service.runtime.name
+  location = var.region
+  role     = "roles/run.developer"
+  member   = google_service_account.deploy.member
+}
+
+# A new revision runs as tatarbot-runtime, so the deployer needs actAs on it.
+resource "google_service_account_iam_member" "deploy_act_as_runtime" {
+  service_account_id = google_service_account.runtime.name
   role               = "roles/iam.serviceAccountUser"
   member             = google_service_account.deploy.member
 }

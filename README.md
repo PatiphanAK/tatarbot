@@ -231,28 +231,37 @@ stack ([`infra/aws/`](infra/aws/README.md)) was applied on 2026-10-19 and stays 
 is verified; then the library audio moves to GCS and AWS is destroyed
 ([ADR 0003](docs/adr/0003-deploy-on-gcp.md)).
 
-* **One e2-micro VM in asia-southeast1** on Container-Optimized OS. The bot and the runtime
-  are separate containers and systemd units on a private Docker network; the bot calls
-  `http://tatarbot-runtime:8080`. About $13/month 24/7 (estimate, unverified rates). The
-  bot runs exactly once: two bots on one token both answer every command.
-* **Secret Manager** for secrets, read by the host at each container start. Containers are
-  blocked from the metadata server, so they never hold the VM's identity.
-* **Supabase** (free tier, Singapore) for library metadata, through the Supavisor pooler in
-  session mode (sqlx uses prepared statements). The bot reads the library table every
-  6 hours, because Supabase pauses free projects without database activity.
+* **Hybrid, all in asia-southeast1.** The bot runs 24/7 on one e2-micro VM
+  (Container-Optimized OS, systemd), because gateway, voice and playback need a long-lived
+  process. The runtime runs on **Cloud Run**: private (internal ingress + IAM), request-based
+  billing, scaling between 0 and 1 instances. About $9.40/month at catalog prices. The bot
+  runs exactly once: two bots on one token both answer every command.
+* **Bot → runtime auth:** the VM's host mints a Google ID token for the runtime's URL every
+  10 minutes. The bot reads it from a read-only file and sends it in
+  `X-Serverless-Authorization`, next to its `AGENT_API_KEY` bearer. The bot container is
+  blocked from the metadata server, so it never holds a service-account credential.
+* **Conversation history in Postgres** (`CONVERSATION_STORE=postgres`), so scaling to zero
+  and deploys lose nothing.
+* **Secret Manager** for secrets, readable per secret by the consuming service only.
+* **Supabase** (free tier, Singapore) for library metadata and history, through the
+  Supavisor pooler in session mode (sqlx uses prepared statements). The bot reads the
+  library table every 6 hours, because Supabase pauses free projects without database
+  activity.
 * **GCS** for library audio, reached by the unchanged S3 client through GCS's XML API with
   an HMAC key (RustFS locally).
-* **Deploys** from GitHub Actions through Workload Identity Federation: push a
-  `linux/amd64` image to Artifact Registry, then `deploy.sh` over IAP SSH, which rolls back
-  if the new container doesn't come up.
+* **Deploys** from GitHub Actions through Workload Identity Federation. Both images are
+  `linux/amd64` in Artifact Registry. The bot deploys with `deploy.sh` over IAP SSH, which
+  rolls back if it doesn't connect. The runtime deploys a new Cloud Run revision, which
+  gets traffic only once it starts.
 
-*Why one VM with systemd:* for one small community, a single shared machine is the cheapest
-always-on option on both clouds. On GCP, ECS's job (restart, image swap, rollback) is small
-enough for two systemd units and a deploy script, and GKE or always-on Cloud Run would cost
-more than the VM. *Why Singapore and not the free US e2-micro:* Supabase, the Qwen endpoint
+*Why split:* the bot must stay connected, and the runtime is idle most of the time. A small
+VM is the cheapest always-on home for the bot, and ECS's job there (restart, image swap,
+rollback) is small enough for a systemd unit and a deploy script. Cloud Run bills the
+runtime only while a turn runs, and costs about $0.50 a month at this usage. The price is a
+cold start (estimated 2–5 s) on the first message after an idle period. *Why Singapore and not the free US e2-micro:* Supabase, the Qwen endpoint
 and the users are in Southeast Asia; every database query from Oregon would add a Pacific
-round trip. The price is availability: one VM is a single point of failure for both
-services, as the single EC2 instance was on AWS.
+round trip. The VM is a single point of failure for the bot, as the single EC2 instance
+was on AWS.
 *Why not serverless for the bot:* Songbird holds the gateway WebSocket and a UDP voice session
 for as long as music plays. *Why not SQLite:* the VM's disk isn't backed up, and a
 persistent local database would tie the data to one machine; Supabase's free Postgres is

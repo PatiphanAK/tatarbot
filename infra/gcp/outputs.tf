@@ -12,6 +12,11 @@ output "shell" {
   value       = "gcloud compute ssh ${google_compute_instance.main.name} --zone ${var.zone} --project ${var.project_id} --tunnel-through-iap"
 }
 
+output "runtime_url" {
+  description = "Private Cloud Run URL (internal ingress + IAM): reachable from the VM only."
+  value       = google_cloud_run_v2_service.runtime.uri
+}
+
 output "image_repositories" {
   value = local.image_repo
 }
@@ -26,8 +31,12 @@ output "music_service_account" {
 }
 
 output "secrets_to_fill" {
-  description = "Secret Manager secrets that need a version before the services start."
-  value       = { for k, s in local.enabled_secrets : s.env => s.id }
+  description = "Secret Manager secrets that need a version before the services start, by consumer."
+  value = {
+    for c in ["discord", "runtime"] : c => {
+      for k, s in local.enabled_secrets : s.env => s.id if contains(s.consumers, c)
+    }
+  }
 }
 
 output "github_actions_variables" {

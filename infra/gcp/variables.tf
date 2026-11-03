@@ -64,13 +64,18 @@ variable "docker_subnet" {
   default     = "172.30.0.0/24"
 }
 
-# ---- Services. Each starts only after its first deploy writes an image reference.
+variable "network_tier" {
+  description = "Tier of the VM's external IP. STANDARD: the first 200 GiB/month of internet egress from Singapore are free (account-wide), and traffic leaves Google's network in Singapore, where Discord, Supabase and Qwen are. PREMIUM: $0.12/GiB from the first byte."
+  type        = string
+  default     = "STANDARD"
 
-variable "runtime_enabled" {
-  description = "Run the Agent Runtime container. false stops it at the next boot or startup-script rerun."
-  type        = bool
-  default     = true
+  validation {
+    condition     = contains(["STANDARD", "PREMIUM"], var.network_tier)
+    error_message = "network_tier must be STANDARD or PREMIUM."
+  }
 }
+
+# ---- Discord bot (the VM). Starts only after its first deploy writes an image reference.
 
 variable "discord_enabled" {
   description = "Run the Discord bot container. Never run it while another bot uses the same token (AWS)."
@@ -78,16 +83,82 @@ variable "discord_enabled" {
   default     = true
 }
 
-variable "runtime_memory_mb" {
-  description = "Hard memory limit of the runtime container. Measured idle: ~70 MiB."
-  type        = number
-  default     = 384
-}
-
 variable "discord_memory_mb" {
-  description = "Hard memory limit of the bot container, including ffmpeg during uploads."
+  description = "Hard memory limit of the bot container, including ffmpeg during uploads. The VM runs nothing else, so up to ~650 fits an e2-micro."
   type        = number
   default     = 512
+}
+
+variable "bot_container_uid" {
+  description = "UID the bot image runs as (distroless nonroot). Only it (and root) can read the ID-token file."
+  type        = number
+  default     = 65532
+}
+
+variable "id_token_refresh_minutes" {
+  description = "How often the host fetches a new ID token for the runtime. Google ID tokens last 60 minutes."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.id_token_refresh_minutes >= 1 && var.id_token_refresh_minutes <= 30
+    error_message = "id_token_refresh_minutes must be 1-30, leaving at least 30 minutes of validity."
+  }
+}
+
+# ---- Agent Runtime (Cloud Run)
+
+variable "runtime_cpu" {
+  description = "vCPU per Cloud Run instance. 1 keeps any concurrency allowed; CPU is billed only while requests run (request-based billing)."
+  type        = string
+  default     = "1"
+}
+
+variable "runtime_memory" {
+  description = "Memory per Cloud Run instance. Measured: ~82 MiB idle."
+  type        = string
+  default     = "512Mi"
+}
+
+variable "runtime_min_instances" {
+  description = "0 scales to zero when idle (cold start on the next message). 1 keeps one warm, billed at the idle min-instance rate."
+  type        = number
+  default     = 0
+}
+
+variable "runtime_max_instances" {
+  description = "Upper bound on instances. 1 keeps the per-conversation turn lock in one process; history is in Postgres either way."
+  type        = number
+  default     = 1
+}
+
+variable "runtime_concurrency" {
+  description = "Concurrent requests per instance. The runtime is async; turns mostly wait on the model."
+  type        = number
+  default     = 10
+}
+
+variable "runtime_request_timeout_seconds" {
+  description = "Cloud Run request timeout. Must exceed agent_timeout_secs so the bot, not Cloud Run, gives up first."
+  type        = number
+  default     = 150
+}
+
+variable "runtime_history_store" {
+  description = "postgres: history survives scale-to-zero (needs the runtime-database-url secret and the migrations). memory: lost whenever the instance stops."
+  type        = string
+  default     = "postgres"
+
+  validation {
+    condition     = contains(["postgres", "memory"], var.runtime_history_store)
+    error_message = "runtime_history_store must be postgres or memory."
+  }
+}
+
+variable "conversation_retention_days" {
+  description = "Conversations idle longer than this are deleted from Postgres."
+  type        = number
+  default     = 30
 }
 
 variable "runtime_port" {
@@ -112,7 +183,7 @@ variable "model_timeout_seconds" {
 }
 
 variable "agent_timeout_secs" {
-  description = "Bot -> runtime timeout."
+  description = "Bot -> runtime timeout, including a cold start."
   type        = number
   default     = 120
 }

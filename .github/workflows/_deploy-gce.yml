@@ -1,4 +1,5 @@
-# Reusable: deploy one service image to the TatarBot VM on GCP (infra/gcp).
+# Reusable: deploy the Discord bot image to the TatarBot VM on GCP (infra/gcp).
+# (The Agent Runtime deploys to Cloud Run: _deploy-cloudrun.yml.)
 #
 # 1. Only commits already on main can be deployed.
 # 2. The image is tagged sha-<commit>; Artifact Registry tags are immutable, so an existing
@@ -6,7 +7,7 @@
 # 3. Images are built for linux/amd64 (e2 machines are x86) on an amd64 runner, no QEMU.
 # 4. The job SSHes to the VM through IAP (OS Login, no stored SSH key) and runs
 #    /etc/tatarbot/deploy.sh, which switches the systemd unit to the new image, waits until
-#    the service is up, and rolls back to the previous image if it isn't.
+#    the bot is connected to Discord, and rolls back to the previous image if it isn't.
 #
 # Requires, in the `production` environment variables (terraform output github_actions_variables):
 #   GCP_PROJECT_ID, GCP_REGION, GCP_ZONE, GCP_VM_NAME, GCP_WIF_PROVIDER, GCP_DEPLOY_SA
@@ -22,10 +23,6 @@ on:
         description: Commit, branch or tag to deploy (must be on main)
         type: string
         required: true
-      service:
-        description: runtime or discord
-        type: string
-        required: true
 
 permissions:
   contents: read
@@ -33,7 +30,7 @@ permissions:
 
 jobs:
   deploy:
-    name: deploy ${{ inputs.service }}
+    name: deploy discord
     runs-on: ubuntu-24.04
     environment: production
     env:
@@ -43,11 +40,10 @@ jobs:
       GCP_VM_NAME: ${{ vars.GCP_VM_NAME }}
       GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
       GCP_DEPLOY_SA: ${{ vars.GCP_DEPLOY_SA }}
-      SERVICE: ${{ inputs.service }}
+      SERVICE: discord
     steps:
       - name: Require deployment configuration
         run: |
-          case "$SERVICE" in runtime|discord) ;; *) echo "::error::unknown service $SERVICE"; exit 1 ;; esac
           missing=""
           for v in GCP_PROJECT_ID GCP_REGION GCP_ZONE GCP_VM_NAME GCP_WIF_PROVIDER GCP_DEPLOY_SA; do
             [ -n "${!v}" ] || missing="$missing $v"
@@ -101,15 +97,15 @@ jobs:
       - uses: docker/build-push-action@v7
         if: steps.exists.outputs.found != 'true'
         with:
-          context: ${{ inputs.service == 'runtime' && 'agent_runtime' || 'discord_bot' }}
+          context: discord_bot
           platforms: linux/amd64
           push: true
           tags: ${{ steps.commit.outputs.image }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.commit.outputs.sha }}
-          cache-from: type=gha,scope=tatarbot-${{ inputs.service }}-amd64
-          cache-to: type=gha,mode=max,scope=tatarbot-${{ inputs.service }}-amd64
+          cache-from: type=gha,scope=tatarbot-discord-amd64
+          cache-to: type=gha,mode=max,scope=tatarbot-discord-amd64
 
       - name: Switch the VM to the image (IAP SSH, rolls back on failure)
         env:

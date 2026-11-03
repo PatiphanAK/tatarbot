@@ -1,4 +1,4 @@
-# Manual deploy of the Agent Runtime to the GCP VM (systemd unit tatarbot-runtime, infra/gcp).
+# Manual deploy of the Agent Runtime to its Cloud Run service (infra/gcp/cloudrun.tf).
 
 name: Deploy runtime (GCP)
 
@@ -14,14 +14,13 @@ permissions:
   contents: read
   id-token: write
 
-# One deploy per service at a time; never cancel one halfway through a switch.
+# One deploy at a time; never cancel one halfway through.
 concurrency:
   group: deploy-gcp-tatarbot-runtime
   cancel-in-progress: false
 
 jobs:
   deploy:
-    uses: ./.github/workflows/_deploy-gce.yml
+    uses: ./.github/workflows/_deploy-cloudrun.yml
     with:
       ref: ${{ inputs.ref }}
-      service: runtime

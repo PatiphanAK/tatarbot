@@ -13,6 +13,7 @@ locals {
     "logging.googleapis.com",
     "monitoring.googleapis.com",
     "oslogin.googleapis.com",
+    "run.googleapis.com",
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
     "sts.googleapis.com",

@@ -24,7 +24,7 @@ module sits next to its code.
 |---|---|
 | [0001](adr/0001-inference-provider.md) | Inference on Runpod Serverless vLLM behind an OpenAI-compatible API (Proposed) |
 | [0002](adr/0002-persistent-rag-store.md) | pgvector + trigram hybrid retrieval in the shared Postgres; S3 presigned uploads with SQS-driven ingestion (Accepted, not deployed) |
-| [0003](adr/0003-deploy-on-gcp.md) | Deploy on one GCE e2-micro VM in asia-southeast1 with COS and systemd, replacing AWS ECS (Accepted, not applied) |
+| [0003](adr/0003-deploy-on-gcp.md) | GCP in asia-southeast1: the bot on a GCE e2-micro (COS, systemd), the runtime on private Cloud Run with ID-token auth and history in Postgres; replaces AWS ECS (Accepted, not applied) |
 
 New ADRs: next number, `Status / Date / Details` header, then Context, Decision,
 Alternatives considered, Consequences, Revisit when.

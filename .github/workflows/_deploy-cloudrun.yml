@@ -1,0 +1,119 @@
+# Reusable: deploy the Agent Runtime image to its Cloud Run service (infra/gcp/cloudrun.tf).
+#
+# 1. Only commits already on main can be deployed.
+# 2. The image is tagged sha-<commit>; Artifact Registry tags are immutable, so an existing
+#    tag is reused and never rebuilt.
+# 3. Built for linux/amd64 on an amd64 runner.
+# 4. `gcloud run services update --image` creates a revision with only the image changed
+#    (Terraform owns the rest of the configuration). Traffic moves to it only once its
+#    startup probe passes; a revision that never starts leaves the previous one serving and
+#    fails the job, so a bad image rolls itself back.
+#
+# Requires, in the `production` environment variables (terraform output github_actions_variables):
+#   GCP_PROJECT_ID, GCP_REGION, GCP_WIF_PROVIDER, GCP_DEPLOY_SA, GCP_RUNTIME_SERVICE
+
+name: Deploy to Cloud Run (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit, branch or tag to deploy (must be on main)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: deploy runtime
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      GCP_DEPLOY_SA: ${{ vars.GCP_DEPLOY_SA }}
+      GCP_RUNTIME_SERVICE: ${{ vars.GCP_RUNTIME_SERVICE }}
+    steps:
+      - name: Require deployment configuration
+        run: |
+          missing=""
+          for v in GCP_PROJECT_ID GCP_REGION GCP_WIF_PROVIDER GCP_DEPLOY_SA GCP_RUNTIME_SERVICE; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Deployment is not configured. Set these variables on the 'production' environment:$missing (see infra/gcp/README.md)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve commit and check it is on main
+        id: commit
+        run: |
+          sha="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$sha" origin/main \
+            || { echo "::error::$sha is not on main; only reviewed commits are deployed."; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "image=$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/tatarbot-runtime:sha-${sha::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Log in to Artifact Registry
+        run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+
+      - name: Does the image already exist?
+        id: exists
+        env:
+          IMAGE: ${{ steps.commit.outputs.image }}
+        run: |
+          if gcloud artifacts docker images describe "$IMAGE" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing image $IMAGE"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.exists.outputs.found != 'true'
+
+      - uses: docker/build-push-action@v7
+        if: steps.exists.outputs.found != 'true'
+        with:
+          context: agent_runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.commit.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.commit.outputs.sha }}
+          cache-from: type=gha,scope=tatarbot-runtime-amd64
+          cache-to: type=gha,mode=max,scope=tatarbot-runtime-amd64
+
+      - name: Roll a new revision (traffic moves only if it starts)
+        env:
+          IMAGE: ${{ steps.commit.outputs.image }}
+        run: |
+          gcloud run services update "$GCP_RUNTIME_SERVICE" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+            --image "$IMAGE" --quiet
+          gcloud run services describe "$GCP_RUNTIME_SERVICE" \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+            --format 'value(status.latestReadyRevisionName,status.traffic[0].percent)'
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.commit.outputs.image }}
+        run: echo "Deployed \`$IMAGE\` to Cloud Run service \`$GCP_RUNTIME_SERVICE\`." >> "$GITHUB_STEP_SUMMARY"
