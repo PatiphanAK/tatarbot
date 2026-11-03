@@ -1,7 +1,8 @@
 # Manual deploy of the Agent Runtime to ECS service tatarbot-runtime.
-# Not triggered automatically until the AWS infrastructure exists (infra/aws).
+# AWS (infra/aws, linux/arm64). Superseded by deploy-gcp-runtime.yml; removed with the AWS
+# teardown (infra/gcp/README.md#migration-from-aws).
 
-name: Deploy runtime
+name: Deploy runtime (AWS)
 
 on:
   workflow_dispatch:

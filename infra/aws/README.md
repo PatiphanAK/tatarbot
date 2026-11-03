@@ -1,9 +1,11 @@
 # TatarBot on AWS ECS (Terraform)
 
-**Status: prepared, never applied.** `terraform fmt` and `validate` pass, and `terraform plan`
-succeeds against the real account for both launch types (35 resources for EC2, 34 for
-Fargate, nothing changed or destroyed). No `apply` has been run and no TatarBot resource
-exists in AWS. Applying creates billable resources.
+**Status: applied on 2026-10-19 (ap-southeast-1), being replaced by [GCP](../gcp/README.md).**
+The local `terraform.tfstate` (not in git, the only copy) holds the live stack: the ASG runs
+the instance 12:55–16:00 Bangkok time, both ECS services are at desired count 0, and the
+music bucket holds the library audio. It stays until GCP is deployed and verified, then the
+audio moves to GCS and this stack is destroyed with that state
+([migration runbook](../gcp/README.md#migration-from-aws)).
 
 Two ways to run the same two ECS services (`tatarbot-discord`, `tatarbot-runtime`),
 chosen with `launch_type`:

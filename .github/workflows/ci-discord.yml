@@ -77,8 +77,16 @@ jobs:
         run: make sqlx-check
 
   image:
-    name: image build + smoke
-    runs-on: ubuntu-24.04-arm # same architecture as the deployed image
+    name: image build + smoke (${{ matrix.arch }})
+    # Same architecture as the deployed images: amd64 on GCP, arm64 on AWS until it is
+    # torn down (then drop arm64).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -90,8 +98,8 @@ jobs:
           tags: tatarbot-discord:ci
           load: true
           push: false
-          cache-from: type=gha,scope=tatarbot-discord
-          cache-to: type=gha,mode=max,scope=tatarbot-discord
+          cache-from: type=gha,scope=tatarbot-discord-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=tatarbot-discord-${{ matrix.arch }}
       - name: Fails fast without a token
         run: |
           docker run --rm --read-only tatarbot-discord:ci 2>&1 | tee out.txt || true
