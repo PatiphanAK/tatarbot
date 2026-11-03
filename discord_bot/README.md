@@ -34,6 +34,7 @@ stations.toml               default radio stations (embedded)
 | `DISCORD_TOKEN` | yes | – | Bot token |
 | `AGENT_BASE_URL` | no | `http://localhost:8080` | Agent runtime base URL |
 | `AGENT_API_KEY` | no | – | Sent as `Authorization: Bearer <key>` |
+| `AGENT_ID_TOKEN_FILE` | no | – | File with a Google ID token for a private Cloud Run runtime, sent as `X-Serverless-Authorization: Bearer <token>`; re-read on every request (the GCP host refreshes it) |
 | `AGENT_TIMEOUT_SECS` | no | `120` | Chat request timeout |
 | `MUSIC_STATIONS_FILE` | no | built-in `stations.toml` | Radio stations (TOML, 1–25 entries) |
 | `MUSIC_MAX_QUEUE` | no | `50` | Tracks per server, including the one playing (1–500) |
