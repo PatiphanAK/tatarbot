@@ -351,3 +351,20 @@ variable "budget_brake_enabled" {
   type        = bool
   default     = true
 }
+
+variable "vm_schedule" {
+  description = "Daily start/stop of the bot VM (Compute Engine instance schedule): cron expressions in time_zone. null = 24/7. Google may begin each operation up to 15 minutes late, so schedule the start 15 minutes before the bot must be online, and keep start and stop at least 15 minutes apart."
+  type = object({
+    start     = string
+    stop      = string
+    time_zone = string
+  })
+  default = null
+
+  validation {
+    condition = var.vm_schedule == null || alltrue([
+      for c in try([var.vm_schedule.start, var.vm_schedule.stop], []) : length(split(" ", trimspace(c))) == 5
+    ])
+    error_message = "vm_schedule.start and .stop must be 5-field cron expressions (e.g. \"45 12 * * *\")."
+  }
+}

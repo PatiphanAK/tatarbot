@@ -103,6 +103,9 @@ resource "google_compute_instance" "main" {
 
   allow_stopping_for_update = true
 
+  # Daily start/stop (schedule.tf); empty = 24/7.
+  resource_policies = local.vm_scheduled ? [google_compute_resource_policy.vm_schedule[0].self_link] : []
+
   boot_disk {
     auto_delete = true
     initialize_params {
@@ -170,5 +173,7 @@ resource "google_compute_instance" "main" {
     google_project_service.api,
     google_secret_manager_secret_iam_member.reader,
     google_artifact_registry_repository_iam_member.vm_pull,
+    # The schedule can't act until its service agent may start and stop the VM.
+    google_project_iam_member.vm_scheduler,
   ]
 }
