@@ -7,6 +7,8 @@ mod domain;
 mod error;
 mod instance_lock;
 mod library;
+#[cfg(test)]
+mod test_support;
 mod tls;
 
 use std::sync::Arc;

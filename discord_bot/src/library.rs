@@ -160,7 +160,10 @@ mod tests {
         let library = LibraryUseCase::new(
             PgLibrary::from_pool(pool, true),
             store.clone(),
-            Ffmpeg::new(FfmpegSettings::default()),
+            {
+                crate::test_support::trace_to_test_output();
+                Ffmpeg::new(FfmpegSettings::default())
+            },
             GeneratedMp3,
             LibrarySettings::new(prefix.clone(), 10 * 1024 * 1024),
         );

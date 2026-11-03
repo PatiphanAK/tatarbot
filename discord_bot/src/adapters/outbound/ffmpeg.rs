@@ -111,11 +111,42 @@ impl Ffmpeg {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::info!(
             program = %program.display(),
-            status = %output.status,
+            exit = %describe_exit(&output.status),
             stderr = %stderr.chars().take(500).collect::<String>(),
             "audio processing refused or failed"
         );
         Err(AudioError::Unsupported)
+    }
+}
+
+/// Exit code, or the signal and the limit it usually means: SIGXCPU = RLIMIT_CPU,
+/// SIGXFSZ = RLIMIT_FSIZE, SIGKILL = the timeout (kill_on_drop) or the kernel,
+/// SIGSEGV/SIGABRT/SIGBUS = often a failed allocation under RLIMIT_AS.
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            let meaning = match signal {
+                libc::SIGXCPU => "SIGXCPU, CPU-time limit",
+                libc::SIGXFSZ => "SIGXFSZ, file-size limit",
+                libc::SIGKILL => "SIGKILL",
+                libc::SIGSEGV => "SIGSEGV, possibly a failed allocation (address-space limit)",
+                libc::SIGABRT => "SIGABRT, possibly a failed allocation (address-space limit)",
+                libc::SIGBUS => "SIGBUS",
+                _ => "other signal",
+            };
+            let core = if status.core_dumped() {
+                ", core dumped"
+            } else {
+                ""
+            };
+            return format!("signal {signal} ({meaning}{core})");
+        }
+    }
+    match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => status.to_string(),
     }
 }
 
@@ -300,6 +331,7 @@ mod tests {
     // ---- Against the real binaries (`ffmpeg`/`ffprobe` on PATH).
 
     fn ffmpeg() -> Ffmpeg {
+        crate::test_support::trace_to_test_output();
         Ffmpeg::new(FfmpegSettings::default())
     }
 
@@ -388,6 +420,221 @@ mod tests {
             let out = dir.path().join(format!("{name}.ogg"));
             assert!(ffmpeg().transcode(&path, &out).await.is_err(), "{name}");
         }
+    }
+
+    /// TEMPORARY (remove before merge): runs the production probe and transcode with one
+    /// factor changed at a time and fails with the whole table, so CI shows it.
+    #[tokio::test]
+    #[ignore = "diagnostic, needs ffmpeg/ffprobe on PATH"]
+    async fn ffmpeg_diagnose_runner() {
+        use std::fmt::Write as _;
+        use std::os::unix::process::CommandExt;
+
+        const MIB: u64 = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let input = make_mp3(dir.path()).await;
+        let mut report = String::new();
+
+        let sh = |cmd: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+                + String::from_utf8_lossy(&out.stderr).trim()
+        };
+        writeln!(report, "nproc: {}", sh("nproc")).unwrap();
+        writeln!(
+            report,
+            "ffprobe: {} | {}",
+            sh("command -v ffprobe"),
+            sh("ffprobe -version | head -1")
+        )
+        .unwrap();
+        writeln!(
+            report,
+            "missing libs (ffprobe): [{}]",
+            sh("ldd \"$(command -v ffprobe)\" | grep 'not found'")
+        )
+        .unwrap();
+        writeln!(
+            report,
+            "missing libs (ffmpeg):  [{}]",
+            sh("ldd \"$(command -v ffmpeg)\" | grep 'not found'")
+        )
+        .unwrap();
+        writeln!(
+            report,
+            "runner limits: {}",
+            sh("ulimit -v; ulimit -t; ulimit -f").replace('\n', " ")
+        )
+        .unwrap();
+        writeln!(
+            report,
+            "env names: {}",
+            std::env::vars()
+                .map(|(k, _)| k)
+                .filter(|k| !k.contains("TOKEN") && !k.contains("SECRET"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+
+        let probe_args: Vec<String> = [
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            FORMAT_WHITELIST,
+            "-show_entries",
+            "format=duration:stream=codec_type",
+            "-of",
+            "json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .chain([file_arg(&input)])
+        .collect();
+        let out = dir.path().join("o.ogg");
+        let transcode_args: Vec<String> = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            FORMAT_WHITELIST,
+            "-i",
+        ]
+        .into_iter()
+        .map(String::from)
+        .chain([file_arg(&input)])
+        .chain(
+            [
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "128k",
+                "-vbr",
+                "on",
+                "-frame_duration",
+                "20",
+                "-application",
+                "audio",
+                "-t",
+                "900",
+                "-threads",
+                "1",
+                "-f",
+                "ogg",
+                "-y",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .chain([file_arg(&out)])
+        .collect();
+
+        // (label, AS, CPU, FSIZE); None = leave the runner's limit.
+        type L = (Option<u64>, Option<u64>, Option<u64>);
+        let probe_cases: Vec<(&str, L)> = vec![
+            ("no limits", (None, None, None)),
+            ("AS 512M only", (Some(512 * MIB), None, None)),
+            ("CPU 20s only", (None, Some(20), None)),
+            ("FSIZE 0 only", (None, None, Some(0))),
+            ("all (production)", (Some(512 * MIB), Some(20), Some(0))),
+            ("all, AS 1G", (Some(1024 * MIB), Some(20), Some(0))),
+            ("all, AS 2G", (Some(2048 * MIB), Some(20), Some(0))),
+            ("all, AS 4G", (Some(4096 * MIB), Some(20), Some(0))),
+            ("all, AS 8G", (Some(8192 * MIB), Some(20), Some(0))),
+        ];
+        let transcode_cases: Vec<(&str, L)> = vec![
+            ("no limits", (None, None, None)),
+            ("AS 512M only", (Some(512 * MIB), None, None)),
+            ("CPU 240s only", (None, Some(240), None)),
+            ("FSIZE 64M only", (None, None, Some(64 * MIB))),
+            (
+                "all (production)",
+                (Some(512 * MIB), Some(240), Some(64 * MIB)),
+            ),
+            ("all, AS 2G", (Some(2048 * MIB), Some(240), Some(64 * MIB))),
+        ];
+
+        let run = |program: &str, args: &[String], clear_env: bool, (mem, cpu, fsize): L| {
+            let mut c = std::process::Command::new(program);
+            c.args(args).stdin(Stdio::null());
+            if clear_env {
+                c.env_clear();
+            }
+            unsafe {
+                c.pre_exec(move || {
+                    for (res, v) in [
+                        (libc::RLIMIT_AS, mem),
+                        (libc::RLIMIT_CPU, cpu),
+                        (libc::RLIMIT_FSIZE, fsize),
+                    ] {
+                        if let Some(v) = v {
+                            let l = libc::rlimit {
+                                rlim_cur: v as libc::rlim_t,
+                                rlim_max: v as libc::rlim_t,
+                            };
+                            if libc::setrlimit(res, &l) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                    }
+                    Ok(())
+                });
+            }
+            match c.output() {
+                Ok(o) => format!(
+                    "{} | stderr: {}",
+                    describe_exit(&o.status),
+                    String::from_utf8_lossy(&o.stderr)
+                        .chars()
+                        .take(300)
+                        .collect::<String>()
+                        .replace('\n', " / ")
+                ),
+                Err(e) => format!("spawn error: {e}"),
+            }
+        };
+
+        for clear_env in [false, true] {
+            for (label, l) in &probe_cases {
+                let r = run("ffprobe", &probe_args, clear_env, *l);
+                writeln!(
+                    report,
+                    "probe     env_clear={clear_env:<5} {label:<18} -> {r}"
+                )
+                .unwrap();
+            }
+            for (label, l) in &transcode_cases {
+                let r = run("ffmpeg", &transcode_args, clear_env, *l);
+                writeln!(
+                    report,
+                    "transcode env_clear={clear_env:<5} {label:<18} -> {r}"
+                )
+                .unwrap();
+            }
+        }
+        panic!("diagnostic report (intentional failure):\n{report}");
     }
 
     #[tokio::test]
