@@ -45,17 +45,17 @@ build: ## Debug build
 release: ## Optimised build (target/release/tatarbot-discord)
 	cargo build --release
 
-test: ## Run unit tests
-	cargo test
+test: ## Run unit tests (bot and ingest-core)
+	cargo test --workspace
 
 lint: ## Run clippy, warnings as errors
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 fmt: ## Format code
-	cargo fmt
+	cargo fmt --all
 
 fmt-check: ## Check formatting
-	cargo fmt --check
+	cargo fmt --all --check
 
 check: fmt-check lint test ## Format check, lint and test
 
@@ -70,8 +70,9 @@ library-up: ## Start local Postgres + RustFS for the music library (compose)
 library-down: ## Stop local Postgres + RustFS (data volumes are kept)
 	docker compose -f ../compose.yaml stop postgres rustfs
 
-test-db: library-up ## Integration tests: Postgres races, RustFS, ffmpeg, end to end
-	DATABASE_URL=$(DEV_DB) $(DEV_S3) cargo test -- --ignored pg_ s3_ ffmpeg_ library_end_to_end
+test-db: library-up ## Integration tests: Postgres races, RustFS, ffmpeg, ingest (ADR 0004), end to end
+	DATABASE_URL=$(DEV_DB) $(DEV_S3) cargo test -- --ignored pg_ s3_ ffmpeg_ ingest_ library_end_to_end
+	DATABASE_URL=$(DEV_DB) cargo test -p ingest-core -- --ignored
 
 sqlx-prepare: library-up ## Refresh the .sqlx query cache after changing SQL (commit it)
 	DATABASE_URL=$(DEV_DB) cargo sqlx migrate run

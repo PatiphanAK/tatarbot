@@ -231,6 +231,26 @@ pub trait ObjectStore: Send + Sync {
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, StoreError>;
 }
 
+/// A shared store is a store (the library composes `Arc<dyn ObjectStore>`).
+#[async_trait]
+impl<T: ObjectStore + ?Sized> ObjectStore for std::sync::Arc<T> {
+    async fn put_file(&self, key: &str, path: &Path) -> Result<(), StoreError> {
+        (**self).put_file(key, path).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), StoreError> {
+        (**self).delete(key).await
+    }
+    async fn last_modified(&self, key: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
+        (**self).last_modified(key).await
+    }
+    async fn list(&self, prefix: &str) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
+        (**self).list(prefix).await
+    }
+    async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, StoreError> {
+        (**self).presign_get(key, ttl).await
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]
 pub struct StoreError(pub String);
@@ -255,6 +275,10 @@ pub enum AudioError {
     Unsupported,
     #[error("timed out")]
     Timeout,
+    /// The tool hit a resource limit (killed by a signal, EAGAIN/ENOMEM): not the file's
+    /// fault, worth one retry (ADR 0004).
+    #[error("resource limit: {0}")]
+    ResourceLimit(String),
     #[error("{0}")]
     Failed(String),
 }

@@ -33,6 +33,32 @@ pub struct LibraryConfig {
     pub quota_bytes: u64,
     pub ffmpeg: std::path::PathBuf,
     pub ffprobe: std::path::PathBuf,
+    /// Where uploads are validated and transcoded (ADR 0004).
+    pub processing: LibraryProcessing,
+    /// How the bot reads (and writes) library objects.
+    pub storage: LibraryStorage,
+}
+
+/// `LIBRARY_PROCESSING`: `local` (in the bot, the default) or `worker` (the Cloud Run ingest
+/// worker, ADR 0004).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryProcessing {
+    Local,
+    Worker {
+        /// `INGEST_URL`: the worker's service URL.
+        url: Url,
+        /// `INGEST_ID_TOKEN_FILE`: a Google ID token for that URL, refreshed by the host.
+        id_token_file: std::path::PathBuf,
+    },
+}
+
+/// `LIBRARY_STORAGE`: `s3` (S3 API with HMAC or local RustFS, the default) or `gcs`
+/// (read-only playback with a downscoped bearer token from `GCS_TOKEN_FILE`; uploads and
+/// deletes go through the worker, so it requires `LIBRARY_PROCESSING=worker`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryStorage {
+    S3,
+    GcsBearer { token_file: std::path::PathBuf },
 }
 
 impl LibraryConfig {
@@ -51,7 +77,43 @@ impl LibraryConfig {
             ));
         }
         let quota_mb = parse_range("MUSIC_GUILD_QUOTA_MB", 1..=100_000, 500)?;
+        let processing = match optional("LIBRARY_PROCESSING").as_deref() {
+            None | Some("local") => LibraryProcessing::Local,
+            Some("worker") => {
+                let url = optional("INGEST_URL").ok_or(AppError::MissingEnv("INGEST_URL"))?;
+                let url = Url::parse(&url).map_err(|e| invalid("INGEST_URL", &e.to_string()))?;
+                if url.scheme() != "https" && url.host_str() != Some("127.0.0.1") {
+                    return Err(invalid("INGEST_URL", "must be https"));
+                }
+                LibraryProcessing::Worker {
+                    url,
+                    id_token_file: optional("INGEST_ID_TOKEN_FILE")
+                        .ok_or(AppError::MissingEnv("INGEST_ID_TOKEN_FILE"))?
+                        .into(),
+                }
+            }
+            Some(_) => return Err(invalid("LIBRARY_PROCESSING", "must be local or worker")),
+        };
+        let storage = match optional("LIBRARY_STORAGE").as_deref() {
+            None | Some("s3") => LibraryStorage::S3,
+            Some("gcs") => {
+                if processing == LibraryProcessing::Local {
+                    return Err(invalid(
+                        "LIBRARY_STORAGE",
+                        "gcs is read-only and needs LIBRARY_PROCESSING=worker",
+                    ));
+                }
+                LibraryStorage::GcsBearer {
+                    token_file: optional("GCS_TOKEN_FILE")
+                        .ok_or(AppError::MissingEnv("GCS_TOKEN_FILE"))?
+                        .into(),
+                }
+            }
+            Some(_) => return Err(invalid("LIBRARY_STORAGE", "must be s3 or gcs")),
+        };
         Ok(Some(Self {
+            processing,
+            storage,
             database_url,
             max_connections: parse_range("DATABASE_MAX_CONNECTIONS", 1..=20, 3)? as u32,
             bucket,
@@ -79,6 +141,8 @@ impl fmt::Debug for LibraryConfig {
             .field("endpoint", &self.endpoint)
             .field("upload_role", &self.upload_role)
             .field("quota_bytes", &self.quota_bytes)
+            .field("processing", &self.processing)
+            .field("storage", &self.storage)
             .finish_non_exhaustive()
     }
 }
@@ -246,6 +310,8 @@ mod tests {
             quota_bytes: 1,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
+            processing: LibraryProcessing::Local,
+            storage: LibraryStorage::S3,
         };
         let out = format!("{agent:?} {discord:?} {library:?}");
         assert!(!out.contains("super-secret") && !out.contains("discord-secret"));

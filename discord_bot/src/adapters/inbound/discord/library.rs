@@ -10,8 +10,11 @@ use serenity::all::{
 
 use super::{presenter, respond};
 use crate::application::ports::{Attachment, LibraryError, LibraryService, UploadRequest};
+use crate::application::use_cases::check_upload;
+use crate::domain::library::MAX_UPLOAD_BYTES;
 use crate::domain::library::{LibraryTrackId, MAX_TITLE_CHARS};
 use crate::domain::music::{GuildId, UserId};
+use crate::ingest::producer::{Queued, SubmitFailure, UploadContext, UploadQueue};
 
 const AUTOCOMPLETE_CHOICES: usize = 25;
 /// Leaves ~1 s of Discord's 3 s for the round trip.
@@ -87,6 +90,7 @@ pub async fn handle(
     cmd: &CommandInteraction,
     library: &dyn LibraryService,
     upload_role: &str,
+    uploads: Option<&UploadQueue>,
 ) {
     // First: downloads, transcodes and database calls can exceed Discord's 3 s.
     let Some(reply) = respond::defer(ctx, cmd).await else {
@@ -123,17 +127,26 @@ pub async fn handle(
             }
             match attachment {
                 None => Err(presenter::library_error(&LibraryError::NotAudio)),
-                Some(attachment) => library
-                    .upload(UploadRequest {
+                Some(attachment) => {
+                    let request = UploadRequest {
                         guild,
                         user,
                         can_upload: manager,
                         attachment,
                         title,
-                    })
-                    .await
-                    .map(|outcome| presenter::uploaded(&outcome))
-                    .map_err(refused),
+                    };
+                    match uploads {
+                        None => library
+                            .upload(request)
+                            .await
+                            .map(|outcome| presenter::uploaded(&outcome))
+                            .map_err(refused),
+                        Some(queue) => submit_upload(cmd, queue, request).await.map_err(|e| {
+                            tracing::info!(error = %e, "upload refused");
+                            e
+                        }),
+                    }
+                }
             }
         }
         "library" => {
@@ -175,6 +188,35 @@ pub async fn handle(
         }
     };
     reply.result(result).await;
+}
+
+/// Worker mode: same pre-checks as local uploads, then record and submit; the result is
+/// posted later by the notifier (editing this reply while the token is valid).
+async fn submit_upload(
+    cmd: &CommandInteraction,
+    queue: &UploadQueue,
+    request: UploadRequest,
+) -> Result<String, String> {
+    let title =
+        check_upload(&request, MAX_UPLOAD_BYTES).map_err(|e| presenter::library_error(&e))?;
+    let ctx = UploadContext {
+        interaction_id: cmd.id.get(),
+        application_id: cmd.application_id.get(),
+        token: cmd.token.clone(),
+        guild: request.guild,
+        channel_id: cmd.channel_id.get(),
+        user: request.user,
+        title: title.clone(),
+        attachment: request.attachment,
+    };
+    match queue.enqueue(&ctx).await {
+        Ok(Queued::Submitted) => Ok(presenter::upload_queued(&title)),
+        Ok(Queued::WillRetry) => Ok(presenter::upload_will_retry(&title)),
+        Err(SubmitFailure::Refused { code, .. }) => Err(presenter::upload_refused(&code)),
+        Err(SubmitFailure::Unavailable(_)) => {
+            Err(presenter::library_error(&LibraryError::Unavailable))
+        }
+    }
 }
 
 /// Title suggestions for `/play query` (value: the title) and `/delete track`

@@ -52,6 +52,8 @@ RUN apt-get update \
 ENV LIBOPUS_NO_PKG=1 LIBOPUS_LIB_DIR=/opt/opus LIBOPUS_STATIC=1
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# The generic ingestion core (ADR 0004), a workspace member.
+COPY crates ./crates
 # sqlx compiles queries from the committed cache (.cargo/config.toml: SQLX_OFFLINE);
 # migrations are embedded in the binary.
 COPY .cargo ./.cargo
@@ -62,15 +64,27 @@ COPY stations.toml ./
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
-    && cp target/release/tatarbot-discord /tatarbot-discord
+    cargo build --release --locked --bins \
+    && cp target/release/tatarbot-discord /tatarbot-discord \
+    && cp target/release/ingest-worker /ingest-worker
 
-# glibc + CA certificates, no shell, runs as uid 65532.
+# The Cloud Run ingest worker (ADR 0004): `docker build --target worker`. Same ffmpeg build
+# and limits as the bot; no Discord token, no voice.
+FROM gcr.io/distroless/cc-debian13:nonroot AS worker
+COPY --from=ffmpeg /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffprobe /usr/local/bin/
+COPY certs/supabase-root-2021.crt /etc/tatarbot/supabase-root-2021.crt
+COPY --from=build /ingest-worker /usr/local/bin/ingest-worker
+ENV NO_COLOR=1 FFMPEG_PATH=/usr/local/bin/ffmpeg FFPROBE_PATH=/usr/local/bin/ffprobe
+ENTRYPOINT ["/usr/local/bin/ingest-worker"]
+CMD ["serve"]
+
+# The bot (default target, last stage). glibc + CA certificates, no shell, runs as uid 65532.
 FROM gcr.io/distroless/cc-debian13:nonroot
 COPY --from=ffmpeg /opt/ffmpeg/bin/ffmpeg /opt/ffmpeg/bin/ffprobe /usr/local/bin/
 # Supabase's public root CA, for DATABASE_URL=...?sslmode=verify-full&sslrootcert=<this>.
 COPY certs/supabase-root-2021.crt /etc/tatarbot/supabase-root-2021.crt
 COPY --from=build /tatarbot-discord /usr/local/bin/tatarbot-discord
 # Plain log lines for docker logs / CloudWatch (tracing-subscriber honours NO_COLOR).
-ENV NO_COLOR=1
+# Absolute ffmpeg paths: the wrapper runs it with an empty environment (no PATH).
+ENV NO_COLOR=1 FFMPEG_PATH=/usr/local/bin/ffmpeg FFPROBE_PATH=/usr/local/bin/ffprobe
 ENTRYPOINT ["/usr/local/bin/tatarbot-discord"]
