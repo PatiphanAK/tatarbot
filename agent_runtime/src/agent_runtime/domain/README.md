@@ -27,5 +27,5 @@ everything is a pure function or a frozen dataclass and is unit-tested without f
 
 ## Extending
 
-New policy: add a module with pure functions and its own `tests/test_<module>.py`, and
+New policy: add a module with pure functions and its own `tests/domain_test/test_<module>.py`, and
 call it from a use case in `application/`. Anything that needs I/O belongs behind a port.

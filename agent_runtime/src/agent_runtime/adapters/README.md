@@ -45,7 +45,7 @@ Example: a new embedding provider.
    changes the vectors (model, dimensions, prefixes).
 2. One `case` in `build_embedder` (`main.py`) and its name in `EMBEDDING_PROVIDERS`
    (`config.py`).
-3. Tests with a mocked transport (see `tests/test_embeddings.py`).
+3. Tests with a mocked transport (see `tests/adapters_test/test_embeddings.py`).
 
 The same pattern holds for other ports: implement the ABC, select it in `main.py` from a
 setting, document the setting in the runtime README and `.env.example`.
