@@ -9,7 +9,7 @@ IMAGE    ?= tatarbot-agent-runtime:local
 DEV_DB   ?= postgres://tatarbot:tatarbot-local@127.0.0.1:$${POSTGRES_PORT:-55432}/tatarbot
 
 .DEFAULT_GOAL := help
-.PHONY: help install env run dev test lint fmt check smoke db-up migrate migrate-rag migrate-runtime test-db worker image image-run
+.PHONY: help install env run dev test lint fmt check smoke db-up migrate migrate-rag migrate-runtime test-db worker image image-run eval eval-ui
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -61,6 +61,12 @@ worker: ## Run the upload ingestion worker with .env (SQS -> parse, embed -> Pos
 
 test-db: db-up ## Tests incl. migrations, store, ingestion against local Postgres (fresh database per test)
 	TEST_DATABASE_URL=$(DEV_DB) uv run pytest -q
+
+eval: ## Agent eval against the model in .env, logged to MLflow (ARGS="--category music-play --limit 5")
+	@$(LOAD_ENV); uv run --group eval python -m evals.run $(ARGS)
+
+eval-ui: ## MLflow UI for eval runs on 127.0.0.1:5000
+	uv run --group eval mlflow ui --backend-store-uri sqlite:///evals/mlflow.db --host 127.0.0.1 --port $${MLFLOW_PORT:-5000}
 
 smoke: ## Call a running runtime: /health, /ready, /v1/chat
 	@$(LOAD_ENV); URL=http://$${HOST:-127.0.0.1}:$${PORT:-8080}; \

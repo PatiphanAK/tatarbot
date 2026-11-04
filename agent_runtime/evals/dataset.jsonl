@@ -1,0 +1,59 @@
+{"id": "chat-th-1", "category": "chitchat", "inputs": {"message": "สวัสดีครับ วันนี้เป็นไงบ้าง"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "chat-th-2", "category": "chitchat", "inputs": {"message": "ขอบคุณมากนะ ช่วยได้เยอะเลย"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "chat-th-3", "category": "chitchat", "inputs": {"message": "เบื่อจัง เล่าเรื่องตลกให้ฟังหน่อย"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "chat-th-4", "category": "chitchat", "inputs": {"message": "คุณชื่ออะไร ทำอะไรได้บ้าง"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "chat-en-1", "category": "chitchat", "inputs": {"message": "hey, how's it going?"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "chat-en-2", "category": "chitchat", "inputs": {"message": "thanks, that was helpful!"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "chat-en-3", "category": "chitchat", "inputs": {"message": "what can you do?"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "chat-en-4", "category": "chitchat", "inputs": {"message": "give me a fun fact about cats"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "know-th-1", "category": "knowledge", "inputs": {"message": "1 กิโลเมตรเท่ากับกี่เมตร"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "know-th-2", "category": "knowledge", "inputs": {"message": "ช่วยอธิบายว่า recursion คืออะไรแบบง่ายๆ"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "know-th-3", "category": "knowledge", "inputs": {"message": "25 คูณ 17 ได้เท่าไร"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "know-th-4", "category": "knowledge", "inputs": {"message": "ช่วยแปลประโยคนี้เป็นภาษาอังกฤษ: วันนี้อากาศดีมาก"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "know-th-5", "category": "knowledge", "inputs": {"message": "เขียน Python function หาค่าเฉลี่ยของ list ให้หน่อย"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "know-en-1", "category": "knowledge", "inputs": {"message": "what's the difference between a list and a tuple in Python?"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "know-en-2", "category": "knowledge", "inputs": {"message": "what is 15% of 240?"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "know-en-3", "category": "knowledge", "inputs": {"message": "explain what a hash map is in two sentences"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "know-en-4", "category": "knowledge", "inputs": {"message": "write a haiku about rain"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "know-en-5", "category": "knowledge", "inputs": {"message": "what is the capital of Australia?"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "search-th-1", "category": "current", "inputs": {"message": "ราคาทองคำวันนี้เท่าไร"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-th-2", "category": "current", "inputs": {"message": "พรุ่งนี้กรุงเทพฝนตกไหม"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-th-3", "category": "current", "inputs": {"message": "ข่าวล่าสุดเกี่ยวกับรถไฟความเร็วสูงไทย-จีน"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-th-4", "category": "current", "inputs": {"message": "ค่าเงินบาทต่อดอลลาร์ตอนนี้เท่าไร"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-th-5", "category": "current", "inputs": {"message": "ผลบอลพรีเมียร์ลีกเมื่อคืนเป็นยังไงบ้าง"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-th-6", "category": "current", "inputs": {"message": "iPhone รุ่นล่าสุดราคาในไทยเท่าไร"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-th-7", "category": "current", "inputs": {"message": "คอนเสิร์ตที่กรุงเทพเดือนนี้มีอะไรบ้าง"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "search-en-1", "category": "current", "inputs": {"message": "what's the latest news about the James Webb telescope?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "search-en-2", "category": "current", "inputs": {"message": "what is the current price of bitcoin?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "search-en-3", "category": "current", "inputs": {"message": "who won the most recent Formula 1 race?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "search-en-4", "category": "current", "inputs": {"message": "when does the next Nintendo console release?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "search-en-5", "category": "current", "inputs": {"message": "what's the weather in Chiang Mai this weekend?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "search-en-6", "category": "current", "inputs": {"message": "latest stable version of Rust?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "search-en-7", "category": "current", "inputs": {"message": "are there any new Python releases this month?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "play-th-1", "category": "music-play", "inputs": {"message": "เปิดเพลงแจ๊สหน่อย"}, "expectations": {"decision": "music", "language": "th", "action": "play", "station": "jazz"}}
+{"id": "play-th-2", "category": "music-play", "inputs": {"message": "อยากฟังเพลงโลไฟตอนอ่านหนังสือ"}, "expectations": {"decision": "music", "language": "th", "action": "play", "station": "lofi"}}
+{"id": "play-th-3", "category": "music-play", "inputs": {"message": "เปิดเพลงชิลๆ ให้ฟังหน่อย"}, "expectations": {"decision": "music", "language": "th", "action": "play"}}
+{"id": "play-th-4", "category": "music-play", "inputs": {"message": "ขอเพลงบรรเลงเบาๆ ไว้นอนหลับ"}, "expectations": {"decision": "music", "language": "th", "action": "play"}}
+{"id": "play-en-1", "category": "music-play", "inputs": {"message": "play some jazz"}, "expectations": {"decision": "music", "language": "en", "action": "play", "station": "jazz"}}
+{"id": "play-en-2", "category": "music-play", "inputs": {"message": "put on lofi beats for studying"}, "expectations": {"decision": "music", "language": "en", "action": "play", "station": "lofi"}}
+{"id": "play-en-3", "category": "music-play", "inputs": {"message": "play something with a spy movie vibe"}, "expectations": {"decision": "music", "language": "en", "action": "play", "station": "lounge"}}
+{"id": "play-en-4", "category": "music-play", "inputs": {"message": "I want ambient drone music"}, "expectations": {"decision": "music", "language": "en", "action": "play", "station": "ambient"}}
+{"id": "ctl-th-1", "category": "music-control", "inputs": {"message": "ข้ามเพลงนี้", "music_state": {"channel": "General", "queue": [{"title": "SomaFM Sonic Universe: modern jazz", "live": true, "song": "Miles Davis - So What"}]}}, "expectations": {"decision": "music", "language": "th", "action": "skip"}}
+{"id": "ctl-th-2", "category": "music-control", "inputs": {"message": "หยุดเพลงได้แล้ว", "music_state": {"channel": "General", "queue": [{"title": "SomaFM Sonic Universe: modern jazz", "live": true, "song": "Miles Davis - So What"}]}}, "expectations": {"decision": "music", "language": "th", "action": "stop"}}
+{"id": "ctl-th-3", "category": "music-control", "inputs": {"message": "ตอนนี้เปิดเพลงอะไรอยู่"}, "expectations": {"decision": "music", "language": "th", "action": "queue"}}
+{"id": "ctl-th-4", "category": "music-control", "inputs": {"message": "พอแล้ว ปิดเพลงเลย", "music_state": {"channel": "General", "queue": [{"title": "SomaFM Sonic Universe: modern jazz", "live": true, "song": "Miles Davis - So What"}]}}, "expectations": {"decision": "music", "language": "th", "action": "stop"}}
+{"id": "ctl-en-1", "category": "music-control", "inputs": {"message": "skip this song", "music_state": {"channel": "General", "queue": [{"title": "SomaFM Sonic Universe: modern jazz", "live": true, "song": "Miles Davis - So What"}]}}, "expectations": {"decision": "music", "language": "en", "action": "skip"}}
+{"id": "ctl-en-2", "category": "music-control", "inputs": {"message": "stop the music", "music_state": {"channel": "General", "queue": [{"title": "SomaFM Sonic Universe: modern jazz", "live": true, "song": "Miles Davis - So What"}]}}, "expectations": {"decision": "music", "language": "en", "action": "stop"}}
+{"id": "ctl-en-3", "category": "music-control", "inputs": {"message": "what's in the queue?"}, "expectations": {"decision": "music", "language": "en", "action": "queue"}}
+{"id": "ctl-en-4", "category": "music-control", "inputs": {"message": "next track please", "music_state": {"channel": "General", "queue": [{"title": "SomaFM Sonic Universe: modern jazz", "live": true, "song": "Miles Davis - So What"}]}}, "expectations": {"decision": "music", "language": "en", "action": "skip"}}
+{"id": "track-th-1", "category": "music-library", "inputs": {"message": "เปิดเพลงลาลาลอยหน่อย", "library_hints": ["ลาลาลอย", "Fly Me to the Moon", "คิดถึง", "Lo-fi Rainy Night"]}, "expectations": {"decision": "music", "language": "th", "action": "play_track", "track_contains": "ลาลาลอย"}}
+{"id": "track-th-2", "category": "music-library", "inputs": {"message": "อยากฟังเพลงคิดถึงที่อัปโหลดไว้", "library_hints": ["ลาลาลอย", "Fly Me to the Moon", "คิดถึง", "Lo-fi Rainy Night"]}, "expectations": {"decision": "music", "language": "th", "action": "play_track", "track_contains": "คิดถึง"}}
+{"id": "track-en-1", "category": "music-library", "inputs": {"message": "play Fly Me to the Moon", "library_hints": ["ลาลาลอย", "Fly Me to the Moon", "คิดถึง", "Lo-fi Rainy Night"]}, "expectations": {"decision": "music", "language": "en", "action": "play_track", "track_contains": "fly me to the moon"}}
+{"id": "track-en-2", "category": "music-library", "inputs": {"message": "play our uploaded Lo-fi Rainy Night track", "library_hints": ["ลาลาลอย", "Fly Me to the Moon", "คิดถึง", "Lo-fi Rainy Night"]}, "expectations": {"decision": "music", "language": "en", "action": "play_track", "track_contains": "rainy night"}}
+{"id": "edge-th-1", "category": "music-question", "inputs": {"message": "ดนตรีแจ๊สเกิดขึ้นที่ประเทศอะไร"}, "expectations": {"decision": ["answer", "search"], "language": "th"}}
+{"id": "edge-th-2", "category": "music-question", "inputs": {"message": "เพลงโลไฟคืออะไร ทำไมคนชอบฟังตอนทำงาน"}, "expectations": {"decision": "answer", "language": "th"}}
+{"id": "edge-th-3", "category": "music-question", "inputs": {"message": "อัลบั้มใหม่ของ Taylor Swift ออกเมื่อไร"}, "expectations": {"decision": "search", "language": "th"}}
+{"id": "edge-en-1", "category": "music-question", "inputs": {"message": "who composed Take Five?"}, "expectations": {"decision": ["answer", "search"], "language": "en"}}
+{"id": "edge-en-2", "category": "music-question", "inputs": {"message": "what's the difference between ambient and lo-fi music?"}, "expectations": {"decision": "answer", "language": "en"}}
+{"id": "edge-en-3", "category": "music-question", "inputs": {"message": "what's number one on the Billboard Hot 100 this week?"}, "expectations": {"decision": "search", "language": "en"}}
+{"id": "edge-en-4", "category": "music-question", "inputs": {"message": "what radio stations can you play?"}, "expectations": {"decision": "answer", "language": "en"}}

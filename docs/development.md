@@ -63,6 +63,7 @@ and `AWS_ENDPOINT_URL_SQS` at an SQS-compatible service of your choice, or call
 | Bot library | `make -C discord_bot test-db` | Docker, ffmpeg | Postgres races and search, RustFS, ffmpeg hardening, end to end |
 | Bot live stations | `cargo test -- --ignored stations_decode icy_live` (in `discord_bot/`) | internet | real radio streams |
 | Integration | `make integration` | Docker | runtime image against a mock OpenAI-compatible model, with the model up and down ([integration/README.md](../integration/README.md)) |
+| Agent eval | `make -C agent_runtime eval` | a model in `agent_runtime/.env` (costs money) | the real model's decisions, tool calls, format and language, logged to MLflow ([evals/README.md](../agent_runtime/evals/README.md)) |
 | Inference smoke | see [model-inference/README.md](../model-inference/README.md#smoke-test) | an endpoint or the mock | OpenAI compatibility of an endpoint |
 | Everything quick | `make check` (repo root) | nothing | runtime lint + tests, bot check |
 
