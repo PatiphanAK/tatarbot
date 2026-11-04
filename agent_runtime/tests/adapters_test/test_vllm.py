@@ -183,3 +183,45 @@ async def test_is_ready_false_when_unreachable():
 
     model, _ = make_model(handler)
     assert await model.is_ready() is False
+
+
+def test_connect_timeout_is_capped_and_read_timeout_is_the_full_budget():
+    model = VLLMModel(BASE, "m", timeout_seconds=30)
+    timeout = model._client.timeout
+    assert (timeout.connect, timeout.read) == (10.0, 30)
+
+    short = VLLMModel(BASE, "m", timeout_seconds=5)
+    assert short._client.timeout.connect == 5
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (429, ModelUnavailableError),  # rate limit or OpenAI insufficient_quota
+        (503, ModelUnavailableError),
+        (504, ModelTimeoutError),
+        (403, ModelRequestRejectedError),  # e.g. Alibaba free quota exhausted
+        (401, ModelRequestRejectedError),
+    ],
+)
+async def test_failed_requests_are_not_retried(status, error):
+    model, seen = make_model(lambda r: httpx.Response(status, json={"error": "x"}))
+
+    with pytest.raises(error):
+        await model.generate(InferenceRequest(messages=(ChatMessage(Role.USER, "hi"),)))
+
+    assert len(seen) == 1  # one paid attempt, no retry
+
+
+@pytest.mark.anyio
+async def test_network_timeout_is_not_retried():
+    def slow(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    model, seen = make_model(slow)
+
+    with pytest.raises(ModelTimeoutError):
+        await model.generate(InferenceRequest(messages=(ChatMessage(Role.USER, "hi"),)))
+
+    assert len(seen) == 1

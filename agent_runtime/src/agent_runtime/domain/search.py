@@ -8,3 +8,5 @@ class SearchResult:
     title: str
     url: str
     snippet: str
+    # When the page was published or updated (YYYY-MM-DD), if the provider says.
+    published: str | None = None

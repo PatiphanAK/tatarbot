@@ -78,6 +78,12 @@ class ChatSettings:
     results_per_search: int = 5
     # Whole turn, all model calls and searches. Below the caller's timeout (bot: 120 s).
     turn_timeout_seconds: float = 110.0
+    # Model calls per turn (a loop backstop), and the time zone of the date the model sees.
+    max_model_calls: int = 10
+    time_zone: str = "Asia/Bangkok"
+    # USD per 1M input / output tokens; both set -> the turn log estimates the cost.
+    price_input_per_mtok: float | None = None
+    price_output_per_mtok: float | None = None
 
 
 class ChatService:
@@ -100,6 +106,8 @@ class ChatService:
                 max_searches=settings.max_searches,
                 results_per_search=settings.results_per_search,
                 turn_timeout_seconds=settings.turn_timeout_seconds,
+                max_model_calls=settings.max_model_calls,
+                time_zone=settings.time_zone,
             ),
         )
         # Serialises turns within one conversation so history stays ordered.
@@ -186,10 +194,13 @@ class ChatService:
                 conversation_id,
                 request_id,
             )
+        tokens_in, tokens_out = result.input_tokens, result.output_tokens
+        cost = _cost_usd(tokens_in, tokens_out, self._settings)
+        # Counts and timings only: no message text, thoughts or queries.
         log.info(
             "chat turn completed conversation_id=%s request_id=%s history=%d language=%s "
-            "knowledge=%d react_steps=%d searches=%d actions=%d model_calls=%d latency_ms=%d "
-            "finish_reason=%s",
+            "knowledge=%d react_steps=%d searches=%d actions=%d model_calls=%d "
+            "input_tokens=%s output_tokens=%s cost_usd=%s latency_ms=%d finish_reason=%s",
             conversation_id,
             request_id,
             len(messages) - 2,
@@ -199,6 +210,9 @@ class ChatService:
             result.searches,
             len(result.actions),
             result.model_calls,
+            "-" if tokens_in is None else tokens_in,
+            "-" if tokens_out is None else tokens_out,
+            "-" if cost is None else f"{cost:.6f}",
             round((time.perf_counter() - started) * 1000),
             result.finish_reason,
         )
@@ -256,6 +270,16 @@ class ChatService:
             lock = asyncio.Lock()
             self._locks[conversation_id] = lock
         return lock
+
+
+def _cost_usd(
+    tokens_in: int | None, tokens_out: int | None, settings: ChatSettings
+) -> float | None:
+    """Estimated USD cost of a turn, if both prices are configured and usage is known."""
+    price_in, price_out = settings.price_input_per_mtok, settings.price_output_per_mtok
+    if None in (tokens_in, tokens_out, price_in, price_out):
+        return None
+    return (tokens_in * price_in + tokens_out * price_out) / 1_000_000
 
 
 def _conversation_language(history: list[ChatMessage]) -> Language | None:

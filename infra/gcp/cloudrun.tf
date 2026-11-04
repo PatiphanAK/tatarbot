@@ -18,12 +18,30 @@ locals {
   # Placeholder for the first apply only (listens on $PORT=8080).
   runtime_bootstrap_image = "us-docker.pkg.dev/cloudrun/container/hello"
 
+  # The active model provider. Alibaba (Qwen): model_base_url / model_name, thinking left
+  # at the runtime default (false). OpenAI: its API, no Qwen thinking field (OpenAI rejects
+  # unknown fields), and the key from the separate openai-api-key secret.
+  model = var.model_provider == "openai" ? {
+    base_url   = "https://api.openai.com/v1"
+    name       = var.openai_model_name
+    timeout    = var.openai_model_timeout_seconds
+    thinking   = "omit"
+    secret_key = "openai_api_key"
+    } : {
+    base_url   = var.model_base_url
+    name       = var.model_name
+    timeout    = var.model_timeout_seconds
+    thinking   = null
+    secret_key = "model_api_key"
+  }
+  model_secret_keys = ["model_api_key", "openai_api_key"]
+
   runtime_env = merge(var.runtime_extra_environment, {
     UVICORN_HOST          = "0.0.0.0"
     UVICORN_PORT          = tostring(var.runtime_port)
-    MODEL_BASE_URL        = var.model_base_url
-    MODEL_NAME            = var.model_name
-    MODEL_TIMEOUT_SECONDS = tostring(var.model_timeout_seconds)
+    MODEL_BASE_URL        = local.model.base_url
+    MODEL_NAME            = local.model.name
+    MODEL_TIMEOUT_SECONDS = tostring(local.model.timeout)
     # Whole turn incl. web searches. Leaves the bot 15 s for a cold start and to report a
     # timeout itself.
     TURN_TIMEOUT_SECONDS = tostring(var.agent_timeout_secs - 15)
@@ -33,9 +51,19 @@ locals {
     # One instance at most; Supabase's session pooler has a small per-user client limit
     # that the bot shares.
     DATABASE_POOL_SIZE = "2"
-  } : {})
+    } : {}, local.model.thinking == null ? {} : {
+    MODEL_ENABLE_THINKING = local.model.thinking
+  })
 
-  runtime_secrets = { for k, s in local.enabled_secrets : s.env => s.id if contains(s.consumers, "runtime") }
+  # Env name -> secret id. Of the model keys, only the active provider's is injected (both
+  # stay readable by the runtime, so switching back needs no IAM change).
+  runtime_secrets = merge(
+    {
+      for k, s in local.enabled_secrets : s.env => s.id
+      if contains(s.consumers, "runtime") && !contains(local.model_secret_keys, k)
+    },
+    { MODEL_API_KEY = local.secrets[local.model.secret_key].id },
+  )
 }
 
 resource "google_service_account" "runtime" {
@@ -126,8 +154,12 @@ resource "google_cloud_run_v2_service" "runtime" {
       error_message = "runtime_request_timeout_seconds must exceed agent_timeout_secs."
     }
     precondition {
-      condition     = var.model_timeout_seconds < var.agent_timeout_secs - 15
-      error_message = "model_timeout_seconds must be below the turn timeout (agent_timeout_secs - 15)."
+      condition     = local.model.timeout < var.agent_timeout_secs - 15
+      error_message = "The model timeout (model_timeout_seconds or openai_model_timeout_seconds) must be below the turn timeout (agent_timeout_secs - 15)."
+    }
+    precondition {
+      condition     = var.model_provider != "openai" || var.openai_enabled
+      error_message = "model_provider = \"openai\" needs openai_enabled = true (its secret), applied and given a version first."
     }
     precondition {
       condition     = var.runtime_max_instances >= 1 && var.runtime_min_instances <= var.runtime_max_instances

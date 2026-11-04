@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def default_system_prompt() -> str:
@@ -22,6 +23,12 @@ CONVERSATION_STORES = ("memory", "postgres")
 # rag.chunks.embedding is vector(1024) (BGE-M3). Another size needs a new migration and a
 # re-embed, never a silent change; the Postgres store also checks the live schema.
 RAG_SCHEMA_DIMENSIONS = 1024
+# MODEL_ENABLE_THINKING values that leave `chat_template_kwargs` out of requests. An empty
+# value works locally; Cloud Run may drop empty environment variables, so `omit` is explicit.
+THINKING_OMIT = ("", "omit", "none")
+# A turn needs at least: reasoning, the answer, and one nudge when the model calls a tool
+# it was not offered.
+MIN_MODEL_CALLS = 3
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,9 @@ class Settings:
     model_max_tokens: int | None = 1024
     model_temperature: float | None = None
     model_enable_thinking: bool | None = False
+    # USD per 1M tokens, for the cost estimate in the per-turn log. Unset: no estimate.
+    model_price_input_per_mtok: float | None = None
+    model_price_output_per_mtok: float | None = None
     system_prompt: str = field(default_factory=default_system_prompt)
     guardrails_enabled: bool = True
     # OWASP API8: FastAPI's /docs, /redoc and /openapi.json are off unless explicitly
@@ -47,6 +57,10 @@ class Settings:
     search_timeout_seconds: float = 10.0
     # Whole turn incl. searches; keep below the caller's timeout (TatarBot: 120s).
     turn_timeout_seconds: float = 110.0
+    # Model calls per turn, a backstop against loops (each call is billed).
+    agent_max_model_calls: int = 10
+    # Local date and time the model is told, e.g. for "today's news".
+    agent_time_zone: str = "Asia/Bangkok"
     max_history_messages: int = 20
     max_conversations: int = 10_000
     # Where history lives. postgres keeps it across restarts and Cloud Run scale-to-zero.
@@ -112,6 +126,7 @@ class Settings:
         return self.runtime_database_url or self.database_url
 
     def __post_init__(self):
+        self._check_agent()
         if self.conversation_store not in CONVERSATION_STORES:
             raise ConfigError(f"CONVERSATION_STORE must be one of {', '.join(CONVERSATION_STORES)}")
         if self.conversation_store == "postgres":
@@ -175,6 +190,25 @@ class Settings:
         if self.rag_s3_prefix and not self.rag_s3_prefix.endswith("/"):
             raise ConfigError("RAG_S3_PREFIX must end with '/'")
 
+    def _check_agent(self) -> None:
+        if self.model_timeout_seconds <= 0 or self.turn_timeout_seconds <= 0:
+            raise ConfigError("MODEL_TIMEOUT_SECONDS and TURN_TIMEOUT_SECONDS must be positive")
+        if self.model_timeout_seconds > self.turn_timeout_seconds:
+            raise ConfigError("MODEL_TIMEOUT_SECONDS must not exceed TURN_TIMEOUT_SECONDS")
+        if not 0 <= self.search_max_searches <= 10:
+            raise ConfigError("SEARCH_MAX_SEARCHES must be between 0 and 10")
+        if self.search_max_results < 1:
+            raise ConfigError("SEARCH_MAX_RESULTS must be at least 1")
+        if self.agent_max_model_calls < MIN_MODEL_CALLS:
+            raise ConfigError(f"AGENT_MAX_MODEL_CALLS must be at least {MIN_MODEL_CALLS}")
+        for price in (self.model_price_input_per_mtok, self.model_price_output_per_mtok):
+            if price is not None and price < 0:
+                raise ConfigError("MODEL_PRICE_*_PER_MTOK must not be negative")
+        try:
+            ZoneInfo(self.agent_time_zone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ConfigError(f"unknown AGENT_TIME_ZONE {self.agent_time_zone!r}") from None
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -185,7 +219,9 @@ class Settings:
             model_timeout_seconds=_parse("MODEL_TIMEOUT_SECONDS", float, 100.0),
             model_max_tokens=_parse("MODEL_MAX_TOKENS", int, 1024),
             model_temperature=_parse("MODEL_TEMPERATURE", float, None),
-            model_enable_thinking=_parse("MODEL_ENABLE_THINKING", _bool, False),
+            model_enable_thinking=_enable_thinking(),
+            model_price_input_per_mtok=_parse("MODEL_PRICE_INPUT_PER_MTOK", float, None),
+            model_price_output_per_mtok=_parse("MODEL_PRICE_OUTPUT_PER_MTOK", float, None),
             system_prompt=_system_prompt(),
             guardrails_enabled=_parse("GUARDRAILS_ENABLED", _bool, True),
             api_docs_enabled=_parse("API_DOCS_ENABLED", _bool, False),
@@ -194,6 +230,8 @@ class Settings:
             search_max_results=_parse("SEARCH_MAX_RESULTS", int, 5),
             search_timeout_seconds=_parse("SEARCH_TIMEOUT_SECONDS", float, 10.0),
             turn_timeout_seconds=_parse("TURN_TIMEOUT_SECONDS", float, 110.0),
+            agent_max_model_calls=_parse("AGENT_MAX_MODEL_CALLS", int, 10),
+            agent_time_zone=_optional("AGENT_TIME_ZONE") or "Asia/Bangkok",
             max_history_messages=_parse("MAX_HISTORY_MESSAGES", int, 20),
             max_conversations=_parse("MAX_CONVERSATIONS", int, 10_000),
             conversation_store=(_optional("CONVERSATION_STORE") or "memory").lower(),
@@ -268,6 +306,17 @@ def _parse(key, parse, default):
         return parse(raw)
     except ValueError as e:
         raise ConfigError(f"invalid value for {key}: {e}") from None
+
+
+def _enable_thinking() -> bool | None:
+    """MODEL_ENABLE_THINKING. Unset: false (hide Qwen3 thinking). Empty, `omit` or `none`:
+    None, so `chat_template_kwargs` is left out, for providers that reject unknown fields
+    (OpenAI)."""
+    if "MODEL_ENABLE_THINKING" not in os.environ:
+        return False
+    if os.environ["MODEL_ENABLE_THINKING"].strip().lower() in THINKING_OMIT:
+        return None
+    return _parse("MODEL_ENABLE_THINKING", _bool, False)
 
 
 def _system_prompt() -> str:

@@ -186,7 +186,9 @@ async def test_search_thought_never_offers_play_music():
 
     model = FakeModel(
         replies=[
-            "Thought: need news.\nNext: SEARCH thai news",
+            # Without a query, so the model makes the search call (with a query the agent
+            # searches without a model call, which offers no tools at all).
+            "Thought: need news.\nNext: SEARCH",
             wants(ToolCall("s1", "web_search", '{"query": "thai news"}')),
             "Thought: done.\nNext: ANSWER",
             "Here's the news.",

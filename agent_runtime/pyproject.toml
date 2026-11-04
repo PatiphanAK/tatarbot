@@ -10,6 +10,7 @@ dependencies = [
     "langgraph>=1.0",
     "psycopg-pool>=3.2",
     "psycopg[binary]>=3.2",
+    "tzdata>=2026.6",
     "uvicorn[standard]>=0.30",
 ]
 

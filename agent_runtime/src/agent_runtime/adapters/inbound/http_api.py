@@ -34,6 +34,7 @@ from agent_runtime.application import ChatService, IndexStatus, KnowledgeBase, M
 from agent_runtime.domain import (
     EmbeddingError,
     InvalidInputError,
+    ModelCallLimitError,
     ModelError,
     ModelRequestRejectedError,
     ModelResponseError,
@@ -421,6 +422,7 @@ _MODEL_ERRORS: list[tuple[type[ModelError], int, str]] = [
     (ModelUnavailableError, 503, "model unavailable"),
     (ModelRequestRejectedError, 502, "model rejected the request"),
     (ModelResponseError, 502, "invalid model response"),
+    (ModelCallLimitError, 502, "model call limit reached"),
 ]
 
 

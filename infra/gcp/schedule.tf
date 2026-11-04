@@ -7,6 +7,9 @@
 #   block, mints the tokens and starts the bot with the image recorded on the stateful disk.
 # * While stopped: no VM or external-IP charges (the IP is ephemeral); the boot disk is
 #   still billed. Deploys need the VM running (IAP SSH), so run them during online hours.
+# * 24/7 for a while (e.g. a demo): vm_schedule_paused = true detaches the policy from the
+#   VM and keeps everything else. Setting vm_schedule = null instead deletes the custom
+#   role, and GCP keeps a deleted role's id reserved for weeks, so re-creating it soon fails.
 
 locals {
   vm_scheduled = var.vm_schedule != null

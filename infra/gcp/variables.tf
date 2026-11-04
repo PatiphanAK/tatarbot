@@ -173,13 +173,42 @@ variable "runtime_port" {
 }
 
 variable "model_base_url" {
-  description = "OpenAI-compatible API root."
+  description = "OpenAI-compatible API root of the alibaba provider (Model Studio; any OpenAI-compatible server works)."
   type        = string
 }
 
 variable "model_name" {
   description = "Model id served by the backend (must appear in GET /models)."
   type        = string
+}
+
+variable "model_provider" {
+  description = "Active model provider: alibaba (model_base_url, model_name, secret model-api-key) or openai (api.openai.com, openai_model_name, secret openai-api-key). Switch back by setting alibaba and applying."
+  type        = string
+  default     = "alibaba"
+
+  validation {
+    condition     = contains(["alibaba", "openai"], var.model_provider)
+    error_message = "model_provider must be alibaba or openai."
+  }
+}
+
+variable "openai_enabled" {
+  description = "Create the OpenAI key secret (<name>-openai-api-key) and let the runtime read it. Apply, add a version, then set model_provider = openai. The Alibaba secret is not touched."
+  type        = bool
+  default     = false
+}
+
+variable "openai_model_name" {
+  description = "OpenAI model when model_provider = openai. gpt-4.1* / gpt-4o* (gpt-5* reject max_tokens)."
+  type        = string
+  default     = "gpt-4.1-mini"
+}
+
+variable "openai_model_timeout_seconds" {
+  description = "Runtime -> OpenAI timeout per call when model_provider = openai."
+  type        = number
+  default     = 30
 }
 
 variable "model_timeout_seconds" {
@@ -350,6 +379,12 @@ variable "budget_brake_enabled" {
   description = "With ingest_enabled and a billing_account: budget notifications are pushed to the worker, which pauses all ingestion when spend reaches the budget (never disables billing)."
   type        = bool
   default     = true
+}
+
+variable "vm_schedule_paused" {
+  description = "true: the VM runs 24/7 (the schedule is detached from it) while vm_schedule, its role and binding are kept. false: the schedule applies again."
+  type        = bool
+  default     = false
 }
 
 variable "vm_schedule" {

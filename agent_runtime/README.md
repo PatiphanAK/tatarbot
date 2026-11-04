@@ -92,19 +92,33 @@ On with `RAG_DOCS_DIR` (in memory) or `RAG_STORE=postgres` (persistent, with upl
 On only with `TAVILY_API_KEY`; without it a turn is one plain model call with no `tools`.
 
 * `reason` is capped at 256 tokens and sees its earlier thoughts and the remaining budget
-  (`SEARCH_MAX_SEARCHES`, default 3). An unclear thought lets the model choose; a tool call
-  after the budget is spent is answered with one "answer now" retry.
+  (`SEARCH_MAX_SEARCHES`, default 3). It also sees the local date and time
+  (`AGENT_TIME_ZONE`, default `Asia/Bangkok`), so "today" means today in Thailand.
+* `act`: a thought ending in `Next: SEARCH <query>` is searched as written, with no model
+  call. Otherwise one model call: `web_search` offered for `Next: SEARCH` without a query,
+  `play_music` for `Next: MUSIC`, nothing for `Next: ANSWER`. An unclear thought lets the
+  model choose; a tool call after the budget is spent is answered with one "answer now"
+  retry.
 * `observe` runs searches concurrently (Tavily, 5 results, excerpts cut to 800 characters)
   and marks results as untrusted. A failed search becomes an observation, not an error.
+* Dates: each result shows its `Published:` date (Tavily's `published_date`, normalised to
+  YYYY-MM-DD, else `unknown`) and the observation states today's local date. The model is
+  told to give older figures with their own date ("latest as of 1 Nov 2026") and never
+  call them today's.
 * The reply gets a `Sources:` / `แหล่งที่มา:` footer with up to 3 links from the actual
   results, as `<url>` so Discord does not unfurl them. History keeps only the user message
   and the final reply (no thoughts, tool messages or footer).
-* The whole turn is bounded by `TURN_TIMEOUT_SECONDS` (110 s, below the bot's 120 s) → 504.
-* Cost: at least two model calls per turn (reason + act), roughly 1.5–2× the latency of
-  plain chat. The model server must support tool calling (vLLM:
+* The whole turn is bounded by `TURN_TIMEOUT_SECONDS` (110 s, below the bot's 120 s) → 504,
+  and by `AGENT_MAX_MODEL_CALLS` (10): a search is allowed only while enough calls remain
+  to finish the turn (thought, answer, one nudge); a call beyond it fails with 502. Nothing
+  is retried.
+* Cost: a plain answer is 2 model calls (reason + answer); each search adds one thought.
+  With 3 searches: 5 calls (was 8). The model server must support tool calling (vLLM:
   `--enable-auto-tool-choice --tool-call-parser hermes`; see `model-inference/`).
-* Logs: `react thought ... decision=search query=...` per step, and `react_steps`,
-  `searches`, `model_calls` per turn.
+* Logs: per step `react thought ... decision=search query_chars=...`; per turn `chat turn
+  completed ... searches model_calls input_tokens output_tokens cost_usd latency_ms`, and
+  `agent turn failed ... error model_calls failed_calls input_tokens` when a turn fails.
+  INFO logs carry no message text, thoughts or queries (those are DEBUG only).
 
 ## Client-side tools (music)
 
@@ -195,11 +209,14 @@ are never returned to the caller.
 | `MODEL_BASE_URL` | yes | – | OpenAI-compatible API root, e.g. `http://127.0.0.1:8000/v1` or Alibaba's `…/compatible-mode/v1` (include `https://`) |
 | `MODEL_NAME` | yes | – | Model id the backend serves (`tatarbot-chat` for `model-inference/`) |
 | `MODEL_API_KEY` | no | – | Backend bearer key |
-| `MODEL_TIMEOUT_SECONDS` | no | `100` | Per model call |
+| `MODEL_TIMEOUT_SECONDS` | no | `100` | Per model call (connect capped at 10 s); no retries. Must not exceed `TURN_TIMEOUT_SECONDS` |
 | `MODEL_MAX_TOKENS`, `MODEL_TEMPERATURE` | no | `1024`, unset | Generation parameters |
-| `MODEL_ENABLE_THINKING` | no | `false` | Qwen3 `chat_template_kwargs.enable_thinking`; empty omits it |
+| `MODEL_ENABLE_THINKING` | no | `false` | Qwen3 `chat_template_kwargs.enable_thinking`; `omit` (or empty) leaves the field out, needed for OpenAI |
+| `MODEL_PRICE_INPUT_PER_MTOK`, `MODEL_PRICE_OUTPUT_PER_MTOK` | no | unset | USD per 1M tokens; both set → `cost_usd` in the per-turn log |
+| `AGENT_MAX_MODEL_CALLS` | no | `10` | Model calls per turn (min 3), a loop backstop |
+| `AGENT_TIME_ZONE` | no | `Asia/Bangkok` | Time zone of the date and time the model is told |
 | `TAVILY_API_KEY` | no | – | Enables the web-search agent |
-| `SEARCH_MAX_SEARCHES`, `SEARCH_MAX_RESULTS`, `SEARCH_TIMEOUT_SECONDS` | no | `3`, `5`, `10` | Search budget |
+| `SEARCH_MAX_SEARCHES`, `SEARCH_MAX_RESULTS`, `SEARCH_TIMEOUT_SECONDS` | no | `3`, `5`, `10` | Search budget (searches 0–10) |
 | `TURN_TIMEOUT_SECONDS` | no | `110` | Whole turn; keep below the bot's timeout |
 | `SYSTEM_PROMPT`, `SYSTEM_PROMPT_FILE` | no | `prompts/system.md` | Override the system prompt |
 | `GUARDRAILS_ENABLED` | no | `true` | Input/output guardrails |

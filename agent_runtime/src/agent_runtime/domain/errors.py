@@ -18,6 +18,11 @@ class ModelRequestRejectedError(ModelError):
     """The backend refused the request (4xx): misconfiguration or bad input."""
 
 
+class ModelCallLimitError(ModelError):
+    """The turn reached its model-call budget (AGENT_MAX_MODEL_CALLS). A backstop: the agent
+    plans its searches so that a turn normally finishes well within the budget."""
+
+
 class ModelResponseError(ModelError):
     """The backend answered with something unusable (malformed or empty)."""
 

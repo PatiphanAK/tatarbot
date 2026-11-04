@@ -21,6 +21,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg-pool" },
+    { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -41,6 +42,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "psycopg-pool", specifier = ">=3.2" },
+    { name = "tzdata", specifier = ">=2026.6" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
