@@ -25,6 +25,9 @@ from agent_runtime.domain import (
 
 log = logging.getLogger(__name__)
 
+# Fail fast on an unreachable host; the read timeout (timeout_seconds) covers generation.
+MAX_CONNECT_TIMEOUT_SECONDS = 10.0
+
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 READY_TIMEOUT_SECONDS = 3.0
 
@@ -43,13 +46,18 @@ class VLLMModel(ModelPort):
         """`base_url` is the API root, e.g. `https://host/v1`.
 
         `enable_thinking` is passed to the chat template (Qwen3-style
-        reasoning models); `None` leaves the template default.
+        reasoning models); `None` omits the field (OpenAI rejects unknown fields).
+
+        One attempt per call: a failed request is never retried here, so a paid API is
+        not billed twice for one model call. Errors map to `ModelError` subclasses.
         """
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/") + "/",
             headers=headers,
-            timeout=timeout_seconds,
+            timeout=httpx.Timeout(
+                timeout_seconds, connect=min(MAX_CONNECT_TIMEOUT_SECONDS, timeout_seconds)
+            ),
         )
         self._model_name = model_name
         self._enable_thinking = enable_thinking

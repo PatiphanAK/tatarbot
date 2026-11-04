@@ -439,6 +439,74 @@ def test_settings_from_env(monkeypatch):
     assert "postgres://x" not in repr(s)
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, False), ("", None), ("omit", None), ("NONE", None), ("true", True), ("false", False)],
+)
+def test_enable_thinking_from_env(monkeypatch, raw, expected):
+    """Unset hides Qwen3 thinking; set but empty omits the field (OpenAI rejects it)."""
+    for key, value in {
+        "AGENT_API_KEY": "k",
+        "MODEL_BASE_URL": "http://m/v1",
+        "MODEL_NAME": "m",
+    }.items():
+        monkeypatch.setenv(key, value)
+    if raw is None:
+        monkeypatch.delenv("MODEL_ENABLE_THINKING", raising=False)
+    else:
+        monkeypatch.setenv("MODEL_ENABLE_THINKING", raw)
+    assert Settings.from_env().model_enable_thinking is expected
+
+
+def _model_env(monkeypatch, **extra):
+    base = {"AGENT_API_KEY": "k", "MODEL_BASE_URL": "http://m/v1", "MODEL_NAME": "m"}
+    for key, value in (base | extra).items():
+        monkeypatch.setenv(key, value)
+
+
+def test_agent_settings_from_env(monkeypatch):
+    _model_env(
+        monkeypatch,
+        AGENT_MAX_MODEL_CALLS="8",
+        AGENT_TIME_ZONE="Asia/Tokyo",
+        MODEL_PRICE_INPUT_PER_MTOK="0.4",
+        MODEL_PRICE_OUTPUT_PER_MTOK="1.6",
+        SEARCH_MAX_SEARCHES="2",
+    )
+    s = Settings.from_env()
+    assert (s.agent_max_model_calls, s.agent_time_zone, s.search_max_searches) == (
+        8,
+        "Asia/Tokyo",
+        2,
+    )
+    assert (s.model_price_input_per_mtok, s.model_price_output_per_mtok) == (0.4, 1.6)
+
+
+def test_agent_settings_defaults(monkeypatch):
+    for key in ("AGENT_MAX_MODEL_CALLS", "AGENT_TIME_ZONE", "MODEL_PRICE_INPUT_PER_MTOK"):
+        monkeypatch.delenv(key, raising=False)
+    _model_env(monkeypatch)
+    s = Settings.from_env()
+    assert (s.agent_max_model_calls, s.agent_time_zone) == (10, "Asia/Bangkok")
+    assert s.model_price_input_per_mtok is None
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "error"),
+    [
+        ("AGENT_MAX_MODEL_CALLS", "2", "AGENT_MAX_MODEL_CALLS must be at least 3"),
+        ("AGENT_TIME_ZONE", "Mars/Olympus", "unknown AGENT_TIME_ZONE"),
+        ("SEARCH_MAX_SEARCHES", "11", "SEARCH_MAX_SEARCHES must be between 0 and 10"),
+        ("MODEL_TIMEOUT_SECONDS", "200", "must not exceed TURN_TIMEOUT_SECONDS"),
+        ("MODEL_PRICE_OUTPUT_PER_MTOK", "-1", "must not be negative"),
+    ],
+)
+def test_invalid_agent_settings(monkeypatch, key, value, error):
+    _model_env(monkeypatch, **{key: value})
+    with pytest.raises(ConfigError, match=error):
+        Settings.from_env()
+
+
 # --- hybrid hits in the pipeline
 
 

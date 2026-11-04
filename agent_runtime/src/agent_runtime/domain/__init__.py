@@ -7,6 +7,7 @@ from agent_runtime.domain import guardrails
 from agent_runtime.domain.errors import (
     EmbeddingError,
     InvalidInputError,
+    ModelCallLimitError,
     ModelError,
     ModelRequestRejectedError,
     ModelResponseError,
@@ -50,6 +51,7 @@ __all__ = [
     "Language",
     "ModelError",
     "ModelRequestRejectedError",
+    "ModelCallLimitError",
     "ModelResponseError",
     "ModelTimeoutError",
     "ModelUnavailableError",
