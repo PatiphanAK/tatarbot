@@ -177,6 +177,10 @@ class Harness:
             max_searches=s.search_max_searches,
             results_per_search=s.search_max_results,
             turn_timeout_seconds=s.turn_timeout_seconds,
+            max_model_calls=s.agent_max_model_calls,
+            time_zone=s.agent_time_zone,
+            price_input_per_mtok=s.model_price_input_per_mtok,
+            price_output_per_mtok=s.model_price_output_per_mtok,
         )
 
     async def turn(
@@ -245,6 +249,8 @@ class Harness:
                 {"action": a.action.value, "station": a.station, "track": a.track} for a in actions
             ],
             "model_calls": result.model_calls if result else 0,
+            "input_tokens": result.input_tokens if result else None,
+            "output_tokens": result.output_tokens if result else None,
             "latency_s": round(latency, 3),
         }
 
@@ -298,6 +304,16 @@ def model_calls(outputs):
 
 
 @scorer(aggregations=["mean", "max"])
+def input_tokens(outputs):
+    return outputs.get("input_tokens")
+
+
+@scorer(aggregations=["mean", "max"])
+def output_tokens(outputs):
+    return outputs.get("output_tokens")
+
+
+@scorer(aggregations=["mean", "max"])
 def searches(outputs):
     return outputs["searches"]
 
@@ -312,6 +328,8 @@ SCORERS = [
     no_leak,
     latency_s,
     model_calls,
+    input_tokens,
+    output_tokens,
     searches,
 ]
 # Pass/fail checks, also reported per category.
@@ -358,6 +376,8 @@ def run_params(settings: Settings, args, dataset: Path, cases: list[dict]) -> di
         "model_temperature": settings.model_temperature,
         "model_max_tokens": settings.model_max_tokens,
         "model_enable_thinking": settings.model_enable_thinking,
+        "max_model_calls": settings.agent_max_model_calls,
+        "time_zone": settings.agent_time_zone,
         "max_searches": settings.search_max_searches,
         "search": "tavily" if args.live_search else "canned",
         "system_prompt_sha": sha(settings.system_prompt),

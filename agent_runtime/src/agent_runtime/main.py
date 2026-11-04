@@ -6,6 +6,7 @@ Run with: uvicorn --factory agent_runtime.main:create_app
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
@@ -133,6 +134,10 @@ def create_app(
             max_searches=settings.search_max_searches,
             results_per_search=settings.search_max_results,
             turn_timeout_seconds=settings.turn_timeout_seconds,
+            max_model_calls=settings.agent_max_model_calls,
+            time_zone=settings.agent_time_zone,
+            price_input_per_mtok=settings.model_price_input_per_mtok,
+            price_output_per_mtok=settings.model_price_output_per_mtok,
         ),
         search=search,
         knowledge=knowledge,
@@ -141,9 +146,20 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         log.info(
-            "agent runtime started (model=%s, guardrails=%s, search=%s, knowledge=%s, "
-            "store=%s, uploads=%s, history=%s)",
+            "agent runtime started (model=%s, model_host=%s, model_timeout_s=%g, thinking=%s, "
+            "max_model_calls=%d, max_searches=%d, time_zone=%s, pricing=%s, guardrails=%s, "
+            "search=%s, knowledge=%s, store=%s, uploads=%s, history=%s)",
             settings.model_name,
+            urlsplit(settings.model_base_url).hostname,
+            settings.model_timeout_seconds,
+            "omit" if settings.model_enable_thinking is None else settings.model_enable_thinking,
+            settings.agent_max_model_calls,
+            settings.search_max_searches,
+            settings.agent_time_zone,
+            "on"
+            if None
+            not in (settings.model_price_input_per_mtok, settings.model_price_output_per_mtok)
+            else "off",
             settings.guardrails_enabled,
             "tavily" if search else "off",
             knowledge.status.embedder if knowledge else "off",

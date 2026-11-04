@@ -7,6 +7,7 @@ from conftest import SYSTEM_PROMPT, FakeModel
 from agent_runtime.adapters.outbound.memory_store import InMemoryConversationStore
 from agent_runtime.application import ChatService, ChatSettings, ModelPort, SearchPort
 from agent_runtime.application.agent import (
+    MAX_QUERY_CHARS,
     REASON_MAX_TOKENS,
     WEB_SEARCH,
     AgentSettings,
@@ -39,6 +40,8 @@ ACT_MARK = "[Agent step, not from the user] Your reasoning:"
 SEARCH_THOUGHT = (
     "Thought: The user wants current weather; I don't know it.\nNext: SEARCH bangkok weather"
 )
+# SEARCH without a query: the model is asked to make the web_search call itself.
+SEARCH_NO_QUERY = "Thought: I need to look this up.\nNext: SEARCH"
 ANSWER_THOUGHT = "Thought: The results say 32°C and sunny.\nNext: ANSWER"
 
 
@@ -136,14 +139,14 @@ async def test_zero_max_searches_disables_the_react_stage():
 
 async def test_full_react_loop():
     model = ReActModel(
-        thoughts=[SEARCH_THOUGHT, ANSWER_THOUGHT],
-        acts=[wants(search_call()), "It is about 32°C and sunny."],
+        thoughts=[SEARCH_THOUGHT, ANSWER_THOUGHT], acts=["It is about 32°C and sunny."]
     )
     search, store = FakeSearch(), InMemoryConversationStore()
 
     reply = await service(model, search, store).chat("c", "What's the weather in Bangkok?")
 
-    assert model.kinds == ["reason", "act", "reason", "act"]
+    # The thought's query is searched as written: no model call to repeat it.
+    assert model.kinds == ["reason", "reason", "act"]
     assert search.queries == ["bangkok weather"]
 
     # Thought: no tools, short budget, sees the conversation.
@@ -153,15 +156,16 @@ async def test_full_react_loop():
     assert "You can still search 3 more time(s)." in first_reason.messages[-1].content
     assert first_reason.messages[-2] == ChatMessage(Role.USER, "What's the weather in Bangkok?")
 
-    # Action: tool offered because the thought chose SEARCH, with its plan and query.
-    first_act, second_act = model.acts
-    assert first_act.tools == (WEB_SEARCH,)
-    act_prompt = first_act.messages[-1].content
-    assert act_prompt.startswith(ACT_MARK)
-    assert "I don't know it." in act_prompt and "'bangkok weather'" in act_prompt
+    # Action: the planned search appears in the scratchpad as an assistant tool call...
+    planned = second_reason.messages[-3]
+    assert planned.role is Role.ASSISTANT and planned.content == ""
+    [call] = planned.tool_calls
+    assert (call.name, json.loads(call.arguments)) == ("web_search", {"query": "bangkok weather"})
 
-    # Observation feeds the next thought, which also sees the earlier one.
+    # ...and its observation (answering that call) feeds the next thought, which also sees
+    # the earlier one.
     assert second_reason.messages[-2].role is Role.TOOL
+    assert second_reason.messages[-2].tool_call_id == call.id
     assert "https://a.example/w" in second_reason.messages[-2].content
     assert "- The user wants current weather; I don't know it." in (
         second_reason.messages[-1].content
@@ -169,6 +173,7 @@ async def test_full_react_loop():
     assert "You can still search 2 more time(s)." in second_reason.messages[-1].content
 
     # The thought chose ANSWER: no tool offered.
+    [second_act] = model.acts
     assert second_act.tools == ()
     assert "write the final answer" in second_act.messages[-1].content
 
@@ -181,13 +186,56 @@ async def test_full_react_loop():
         ChatMessage(Role.ASSISTANT, "It is about 32°C and sunny."),
     ]
     # Request ids number every model call of the turn.
-    assert [r.request_id.rsplit(".", 1)[1] for r in model.requests] == ["1", "2", "3", "4"]
+    assert [r.request_id.rsplit(".", 1)[1] for r in model.requests] == ["1", "2", "3"]
+
+
+async def test_search_without_a_query_asks_the_model_for_the_call():
+    """The previous behaviour, kept when the thought names no query."""
+    model = ReActModel(
+        thoughts=[SEARCH_NO_QUERY, ANSWER_THOUGHT],
+        acts=[wants(search_call("model query")), "It is sunny."],
+    )
+    search = FakeSearch()
+
+    await service(model, search).chat("c", "weather?")
+
+    assert model.kinds == ["reason", "act", "reason", "act"]
+    assert search.queries == ["model query"]
+    first_act = model.acts[0]
+    assert first_act.tools == (WEB_SEARCH,)
+    assert first_act.messages[-1].content.startswith(ACT_MARK)
+    assert "your own keywords" in first_act.messages[-1].content
+
+
+async def test_planned_query_keeps_thai_and_is_bounded():
+    long_query = "ราคาทองคำวันนี้ " + "x" * 400
+    model = ReActModel(thoughts=[f"Thought: gold.\nNext: SEARCH {long_query}"], acts=["ok"])
+    search = FakeSearch()
+
+    await service(model, search).chat("c", "ราคาทองคำวันนี้เท่าไร")
+
+    [query] = search.queries
+    assert query == long_query[:MAX_QUERY_CHARS]
+    planned = model.reasons[1].messages[-3].tool_calls[0]
+    assert "ราคาทองคำ" in planned.arguments  # not \\u-escaped
+
+
+async def test_each_planned_search_gets_its_own_call_id():
+    model = ReActModel(
+        thoughts=[SEARCH_THOUGHT, "Thought: more.\nNext: SEARCH rain radar", ANSWER_THOUGHT],
+        acts=["done"],
+    )
+
+    await service(model, FakeSearch()).chat("c", "weather?")
+
+    final = model.acts[0].messages
+    ids = [c.id for m in final if m.role is Role.ASSISTANT for c in m.tool_calls]
+    answered = [m.tool_call_id for m in final if m.role is Role.TOOL]
+    assert len(set(ids)) == 2 and answered == ids
 
 
 async def test_agent_returns_the_react_trace():
-    model = ReActModel(
-        thoughts=[SEARCH_THOUGHT, ANSWER_THOUGHT], acts=[wants(search_call()), "32°C"]
-    )
+    model = ReActModel(thoughts=[SEARCH_THOUGHT, ANSWER_THOUGHT], acts=["32°C"])
     agent = SearchAgent(model, FakeSearch(), AgentSettings())
 
     result = await agent.run((ChatMessage(Role.USER, "weather?"),), "rid")
@@ -200,7 +248,7 @@ async def test_agent_returns_the_react_trace():
         ),
         ReActStep("The results say 32°C and sunny.", Decision.ANSWER, "answer"),
     )
-    assert (result.searches, result.model_calls) == (1, 4)
+    assert (result.searches, result.model_calls) == (1, 3)
 
 
 async def test_answer_thought_skips_search():
@@ -226,17 +274,18 @@ async def test_unclear_thought_lets_the_model_choose():
 async def test_budget_spent_forces_an_answer():
     model = ReActModel(
         thoughts=[SEARCH_THOUGHT, "Thought: need more.\nNext: SEARCH more weather"],
-        acts=[wants(search_call("q1")), "done"],
+        acts=["done"],
     )
     search = FakeSearch()
 
     reply = await service(model, search, max_searches=1).chat("c", "hi")
 
-    assert search.queries == ["q1"]
+    assert search.queries == ["bangkok weather"]
     assert "No searches left: you must answer now." in model.reasons[1].messages[-1].content
     # SEARCH with no budget left becomes ANSWER.
-    assert model.acts[1].tools == ()
-    assert "write the final answer" in model.acts[1].messages[-1].content
+    [act] = model.acts
+    assert act.tools == ()
+    assert "write the final answer" in act.messages[-1].content
     assert reply.startswith("done")
 
 
@@ -265,7 +314,7 @@ async def test_leaked_scaffold_is_stripped_from_the_answer():
 
 async def test_parallel_calls_beyond_budget_are_refused():
     calls = (search_call("a", "c1"), search_call("b", "c2"), search_call("c", "c3"))
-    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=[wants(*calls), "answer"])
+    model = ReActModel(thoughts=[SEARCH_NO_QUERY], acts=[wants(*calls), "answer"])
     search = FakeSearch()
 
     await service(model, search, max_searches=2).chat("c", "hi")
@@ -278,7 +327,7 @@ async def test_parallel_calls_beyond_budget_are_refused():
 
 
 async def test_search_failure_is_observed_not_raised():
-    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=[wants(search_call()), "Could not check."])
+    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=["Could not check."])
     search = FakeSearch(error=SearchError("search failed (HTTP 500)"))
 
     reply = await service(model, search).chat("c", "news?")
@@ -296,7 +345,7 @@ async def test_search_failure_is_observed_not_raised():
     ],
 )
 async def test_bad_tool_calls_get_an_error_observation(call, error):
-    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=[wants(call), "ok"])
+    model = ReActModel(thoughts=[SEARCH_NO_QUERY], acts=[wants(call), "ok"])
     search = FakeSearch()
 
     await service(model, search).chat("c", "hi")
@@ -317,16 +366,14 @@ async def test_model_errors_propagate_from_any_stage(stage):
 
 
 async def test_turn_timeout_covers_the_whole_loop():
-    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=[wants(search_call()), "late"])
+    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=["late"])
 
     with pytest.raises(ModelTimeoutError):
         await service(model, FakeSearch(delay=1), turn_timeout_seconds=0.05).chat("c", "hi")
 
 
 async def test_thai_turn_gets_thai_sources_label_and_skips_cited_urls():
-    model = ReActModel(
-        thoughts=[SEARCH_THOUGHT], acts=[wants(search_call()), "ร้อนมาก ดูที่ https://a.example/w"]
-    )
+    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=["ร้อนมาก ดูที่ https://a.example/w"])
 
     reply = await service(model, FakeSearch()).chat("c", "อากาศกรุงเทพวันนี้เป็นยังไง")
 
@@ -383,7 +430,7 @@ def test_parse_thought(text, expected):
 
 async def test_calls_to_tools_that_were_not_offered_are_ignored():
     model = ReActModel(
-        thoughts=[SEARCH_THOUGHT],
+        thoughts=[SEARCH_NO_QUERY],
         acts=[wants(ToolCall("c1", "rm_rf", "{}")), "Here is what I know."],
     )
     search = FakeSearch()
