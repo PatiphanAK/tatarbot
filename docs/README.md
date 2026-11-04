@@ -14,6 +14,7 @@ module sits next to its code.
 | Cloud inference audit and design (Phase 0 record) | [architecture/cloud-inference.md](architecture/cloud-inference.md) |
 | Security model and access control | [security.md](security.md) |
 | Development setup, local services, test suites, conventions | [development.md](development.md) |
+| Start, stop, health checks, switching the model provider, running 24/7 | [operations/runbook.md](operations/runbook.md) |
 | Troubleshooting by symptom and log line | [operations/troubleshooting.md](operations/troubleshooting.md) |
 | Infrastructure, deployment, cost, CI/CD (GCP) | [infra/gcp/README.md](../infra/gcp/README.md) |
 | Previous AWS deployment (live until the migration) | [infra/aws/README.md](../infra/aws/README.md) |

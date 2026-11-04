@@ -58,7 +58,7 @@ Content-Type: application/json
   "stream": false,
   "max_tokens": 1024,                       # MODEL_MAX_TOKENS, omitted if unset
   "temperature": 0.7,                       # MODEL_TEMPERATURE, omitted if unset
-  "chat_template_kwargs": {"enable_thinking": false}   # MODEL_ENABLE_THINKING, omitted if empty
+  "chat_template_kwargs": {"enable_thinking": false}   # MODEL_ENABLE_THINKING, omitted if `omit` or empty (OpenAI)
 }
 ```
 
