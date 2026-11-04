@@ -96,7 +96,7 @@ Content-Type: application/json
 Run on 2026-10-10 with `make -C agent_runtime check` and `make -C discord_bot check`:
 
 - `agent_runtime`: ruff lint + format check passed; **64 passed** (pytest). The vLLM adapter
-  is tested against `httpx.MockTransport` (`tests/test_vllm.py`); no test hits a real backend.
+  is tested against `httpx.MockTransport` (`agent_runtime/tests/adapters_test/test_vllm.py`); no test hits a real backend.
 - `discord_bot`: `cargo fmt --check`, `clippy -D warnings` passed; **24 passed**.
 
 ### 1.5 Findings that matter for the cloud move

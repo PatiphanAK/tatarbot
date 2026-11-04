@@ -54,7 +54,7 @@ The app never migrates on startup. Apply migrations before deploying code that n
    satisfy).
 3. Changing the embedding dimension means altering `rag.chunks.embedding` and its index,
    updating `RAG_SCHEMA_DIMENSIONS` in `config.py`, and re-embedding every document.
-4. Test it: `make -C agent_runtime test-db`. `tests/test_migrate.py` applies all migrations
+4. Test it: `make -C agent_runtime test-db`. `tests/postgres_integrations_test/test_migrate.py` applies all migrations
    to a fresh database. Add a test there when a migration must preserve existing rows.
 
 ## Constraints
