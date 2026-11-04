@@ -392,6 +392,12 @@ linked to the project** (`gcloud billing projects link tatarbot --billing-accoun
   bot, or deploy (or `gcloud run services update tatarbot-runtime --region asia-southeast1`)
   for the runtime.
 * **Keep the runtime warm** (cost above): `runtime_min_instances = 1`, then apply.
+* **Switch the model provider** (Alibaba ↔ OpenAI): `model_provider`, with the OpenAI key in
+  its own secret (`openai_enabled`). Steps, order and rollback:
+  [docs/operations/runbook.md](../../docs/operations/runbook.md#gcp-needs-approval-changes-the-live-service).
+* **Run 24/7 for a while:** `vm_schedule_paused = true`, then apply. It detaches the schedule
+  and keeps its custom role (`vm_schedule = null` deletes the role, and GCP keeps a deleted
+  role's id reserved for weeks).
 * **Stop the bot:** `gcloud compute instances stop tatarbot --zone asia-southeast1-b`. The disk
   still bills (~$1.10). The runtime costs nothing while unused.
 

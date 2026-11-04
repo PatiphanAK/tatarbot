@@ -34,7 +34,7 @@ output "secrets_to_fill" {
   description = "Secret Manager secrets that need a version before the services start, by consumer."
   value = {
     for c in ["discord", "runtime"] : c => {
-      for k, s in local.enabled_secrets : s.env => s.id if contains(s.consumers, c)
+      for k, s in local.enabled_secrets : s.id => s.env if contains(s.consumers, c)
     }
   }
 }

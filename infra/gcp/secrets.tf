@@ -20,7 +20,10 @@ locals {
     discord_token = { id = "${var.name}-discord-token", env = "DISCORD_TOKEN", consumers = ["discord"], enabled = var.discord_enabled }
     # The runtime's own bearer key, checked behind Cloud Run IAM as defence in depth.
     agent_api_key = { id = "${var.name}-agent-api-key", env = "AGENT_API_KEY", consumers = ["discord", "runtime"], enabled = true }
-    model_api_key = { id = "${var.name}-model-api-key", env = "MODEL_API_KEY", consumers = ["runtime"], enabled = true }
+    # Model provider keys. Both feed MODEL_API_KEY; model_provider picks which one the runtime
+    # gets (cloudrun.tf). model_api_key holds the Alibaba Model Studio key.
+    model_api_key  = { id = "${var.name}-model-api-key", env = "MODEL_API_KEY", consumers = ["runtime"], enabled = true }
+    openai_api_key = { id = "${var.name}-openai-api-key", env = "MODEL_API_KEY", consumers = ["runtime"], enabled = var.openai_enabled }
     # The runtime enables web search only when this key is set.
     tavily_api_key = { id = "${var.name}-tavily-api-key", env = "TAVILY_API_KEY", consumers = ["runtime"], enabled = var.web_search_enabled }
     # One Supabase database (Supavisor session mode, port 5432, verified TLS) for every

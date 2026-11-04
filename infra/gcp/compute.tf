@@ -104,7 +104,8 @@ resource "google_compute_instance" "main" {
   allow_stopping_for_update = true
 
   # Daily start/stop (schedule.tf); empty = 24/7.
-  resource_policies = local.vm_scheduled ? [google_compute_resource_policy.vm_schedule[0].self_link] : []
+  # Paused: detached (24/7), while the policy, its role and binding stay for a quick resume.
+  resource_policies = local.vm_scheduled && !var.vm_schedule_paused ? [google_compute_resource_policy.vm_schedule[0].self_link] : []
 
   boot_disk {
     auto_delete = true
