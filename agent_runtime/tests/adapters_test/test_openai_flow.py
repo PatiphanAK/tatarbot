@@ -31,7 +31,11 @@ class Gold(SearchPort):
 
     async def search(self, query, max_results):
         self.queries.append(query)
-        return [SearchResult("ราคาทอง", "https://gold.example/today", "62,650 / 62,850")]
+        return [
+            SearchResult(
+                "ราคาทอง", "https://gold.example/today", "62,650 / 62,850", published="2026-11-01"
+            )
+        ]
 
 
 def openai_api():
@@ -102,6 +106,9 @@ async def test_gold_turn_makes_five_model_calls_with_openai_shaped_requests(capl
     assert [c["id"] for c in calls] == answered and len(set(answered)) == 3
     assert all(c["type"] == "function" and c["function"]["name"] == "web_search" for c in calls)
     assert json.loads(calls[0]["function"]["arguments"]) == {"query": "ราคาทองคำวันนี้"}
+    # Each observation states today's local date next to the result's own date.
+    observations = [m["content"] for m in messages if m["role"] == "tool"]
+    assert all("Today is " in o and "Published: 2026-11-01" in o for o in observations)
 
     line = next(r.getMessage() for r in caplog.records if "chat turn completed" in r.message)
     assert "searches=3 actions=0 model_calls=5 input_tokens=5000 output_tokens=250" in line

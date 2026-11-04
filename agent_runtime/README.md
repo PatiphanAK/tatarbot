@@ -101,6 +101,10 @@ On only with `TAVILY_API_KEY`; without it a turn is one plain model call with no
   retry.
 * `observe` runs searches concurrently (Tavily, 5 results, excerpts cut to 800 characters)
   and marks results as untrusted. A failed search becomes an observation, not an error.
+* Dates: each result shows its `Published:` date (Tavily's `published_date`, normalised to
+  YYYY-MM-DD, else `unknown`) and the observation states today's local date. The model is
+  told to give older figures with their own date ("latest as of 1 Nov 2026") and never
+  call them today's.
 * The reply gets a `Sources:` / `แหล่งที่มา:` footer with up to 3 links from the actual
   results, as `<url>` so Discord does not unfurl them. History keeps only the user message
   and the final reply (no thoughts, tool messages or footer).

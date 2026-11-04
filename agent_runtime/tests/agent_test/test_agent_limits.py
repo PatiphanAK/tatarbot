@@ -14,6 +14,7 @@ from agent_runtime.domain import (
     ModelCallLimitError,
     ModelUnavailableError,
     Role,
+    SearchResult,
     TokenUsage,
 )
 
@@ -224,3 +225,45 @@ async def test_system_message_carries_the_local_date():
     system = model.requests[0].messages[0]
     assert system.role is Role.SYSTEM and system.content.startswith(SYSTEM_PROMPT)
     assert "Friday 2027-01-01 00:30 in Asia/Bangkok" in system.content
+
+
+# ---- stale results: today's date next to each result's own date
+
+
+def test_instructions_say_how_to_treat_older_results():
+    text = SearchAgent(ReActModel(), FakeSearch(), AgentSettings()).instructions()
+
+    assert "Results can be older than today" in text
+    assert "never call it today's" in text
+    assert "today's figure was not found" in text
+
+
+async def test_observation_shows_today_and_each_published_date():
+    results = [
+        SearchResult("Gold 1 Nov", "https://a.example", "62,250 baht", published="2026-11-01"),
+        SearchResult("Gold", "https://b.example", "price page"),
+    ]
+    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=["ok"])
+    chat = service(model, FakeSearch(results=results))
+    chat._agent._settings = AgentSettings(now=frozen("2026-11-04T18:48:00+00:00"))
+
+    await chat.chat("c", "ราคาทองคำวันนี้เท่าไร")
+
+    observation = model.reasons[1].messages[-2].content
+    assert "Today is Thursday 2026-11-05." in observation
+    assert "[1] Gold 1 Nov\nURL: https://a.example\nPublished: 2026-11-01\n62,250 baht" in (
+        observation
+    )
+    assert "Published: unknown" in observation
+
+
+async def test_no_results_still_states_today():
+    model = ReActModel(thoughts=[SEARCH_THOUGHT], acts=["nothing found"])
+    chat = service(model, FakeSearch(results=[]))
+    chat._agent._settings = AgentSettings(now=frozen("2026-11-04T18:48:00+00:00"))
+
+    await chat.chat("c", "news?")
+
+    assert "No results for 'bangkok weather' (today is Thursday 2026-11-05)." in (
+        model.reasons[1].messages[-2].content
+    )

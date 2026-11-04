@@ -1,6 +1,8 @@
 """`SearchPort` adapter for the Tavily Search API (https://docs.tavily.com)."""
 
 import logging
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -47,6 +49,7 @@ class TavilySearch(SearchPort):
                     title=str(r.get("title") or ""),
                     url=str(r["url"]),
                     snippet=" ".join(str(r.get("content") or "").split())[:MAX_SNIPPET_CHARS],
+                    published=published_date(r.get("published_date")),
                 )
                 for r in results
             ][:max_results]
@@ -55,3 +58,19 @@ class TavilySearch(SearchPort):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def published_date(value) -> str | None:
+    """Tavily's `published_date` as YYYY-MM-DD: ISO 8601 or RFC 2822 (news feeds). Anything
+    else is dropped rather than shown to the model as a date."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(text).date().isoformat()
+    except (TypeError, ValueError, IndexError):
+        return None

@@ -62,3 +62,41 @@ async def test_failures_raise_search_error(handler):
     search, _ = make_search(handler)
     with pytest.raises(SearchError):
         await search.search("q", 3)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2026-11-01", "2026-11-01"),
+        ("2026-11-01T08:30:00Z", "2026-11-01"),
+        ("2026-11-01T23:30:00+07:00", "2026-11-01"),
+        ("Sat, 01 Nov 2026 08:00:00 GMT", "2026-11-01"),
+        ("yesterday", None),
+        ("", None),
+        (None, None),
+        (20261101, None),
+    ],
+)
+def test_published_date_is_normalised_or_dropped(raw, expected):
+    from agent_runtime.adapters.outbound.tavily import published_date
+
+    assert published_date(raw) == expected
+
+
+async def test_results_carry_the_published_date():
+    payload = {
+        "results": [
+            {
+                "title": "A",
+                "url": "https://a.example",
+                "content": "x",
+                "published_date": "2026-11-01",
+            },
+            {"title": "B", "url": "https://b.example", "content": "y"},
+        ]
+    }
+    search, _ = make_search(lambda r: httpx.Response(200, json=payload))
+
+    a, b = await search.search("gold", 5)
+
+    assert (a.published, b.published) == ("2026-11-01", None)
