@@ -8,3 +8,5 @@ __pycache__/
 tests/
 Makefile
 README.md
+evals/mlflow.db
+evals/mlartifacts/

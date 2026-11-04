@@ -351,6 +351,30 @@ async def test_thai_turn_gets_thai_sources_label_and_skips_cited_urls():
         ),
         ("thought: a\nnext: answer\nNext: SEARCH x", ("a\nnext: answer", "search", "x")),
         ("no structure at all", ("no structure at all", "unclear", "")),
+        # The decision at the end of the thought's last line (seen with Qwen3 in the eval).
+        (
+            "The user wants a fact I know. No search needed. Next: ANSWER",
+            ("The user wants a fact I know. No search needed.", "answer", ""),
+        ),
+        (
+            "Wants gold prices, which change daily. Next: SEARCH gold price Thailand today",
+            ("Wants gold prices, which change daily.", "search", "gold price Thailand today"),
+        ),
+        ("Wants lo-fi for studying. **Next:** MUSIC", ("Wants lo-fi for studying.", "music", "")),
+        # A line-start decision wins over an inline one.
+        (
+            "I said Next: SEARCH x before.\nNext: ANSWER",
+            ("I said Next: SEARCH x before.", "answer", ""),
+        ),
+        # Inside prose without the strict form, it is not a decision.
+        (
+            "I will answer next: search later maybe",
+            ("I will answer next: search later maybe", "unclear", ""),
+        ),
+        (
+            "The next search should cover prices.",
+            ("The next search should cover prices.", "unclear", ""),
+        ),
     ],
 )
 def test_parse_thought(text, expected):

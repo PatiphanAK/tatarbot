@@ -18,6 +18,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+eval = [
+    "mlflow>=3.18.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -28,6 +31,8 @@ packages = ["src/agent_runtime"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `evals` (the agent eval) is imported by its scoring tests.
+pythonpath = ["."]
 filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
 
 [tool.ruff]

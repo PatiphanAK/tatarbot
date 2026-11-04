@@ -124,6 +124,10 @@ _ANSWER_NOW = (
 
 # One line, e.g. "Next: SEARCH x", "**Next:** ANSWER"; never spans lines.
 _NEXT_LINE = re.compile(r"^[^\w\n]*next[^\w\n]*(search|answer|music)\b[ \t:]*(.*)$", re.I | re.M)
+# Fallback for a model that ends its thought with the decision on the same line
+# ("... nothing to look up. Next: ANSWER"). Stricter than _NEXT_LINE, since it may match
+# inside prose: a colon and an upper-case action are required.
+_NEXT_INLINE = re.compile(r"[*_]*\bNext[*_ \t]*:[*_ \t]*(SEARCH|ANSWER|MUSIC)\b[ \t:]*(.*)$", re.M)
 _THOUGHT_LABEL = re.compile(r"^\W*thought\W*:?\s*", re.I)
 # Hermes-style tool-call markup a model may print as text when no tool was offered.
 _TOOL_MARKUP = re.compile(r"<tool_call>.*?(</tool_call>|$)", re.DOTALL)
@@ -450,7 +454,7 @@ def _client_actions(calls: tuple[ToolCall, ...], tools: ClientTools) -> list[Cli
 
 def _parse_thought(text: str) -> tuple[str, Decision, str]:
     """Split a reasoning reply into (thought, decision, search query)."""
-    matches = list(_NEXT_LINE.finditer(text))
+    matches = list(_NEXT_LINE.finditer(text)) or list(_NEXT_INLINE.finditer(text))
     if not matches:
         return _THOUGHT_LABEL.sub("", text).strip(), Decision.UNCLEAR, ""
     last = matches[-1]
