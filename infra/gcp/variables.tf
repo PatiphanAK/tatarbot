@@ -400,6 +400,6 @@ variable "vm_schedule" {
     condition = var.vm_schedule == null || alltrue([
       for c in try([var.vm_schedule.start, var.vm_schedule.stop], []) : length(split(" ", trimspace(c))) == 5
     ])
-    error_message = "vm_schedule.start and .stop must be 5-field cron expressions (e.g. \"45 12 * * *\")."
+    error_message = "vm_schedule.start and .stop must be 5-field cron expressions (e.g. \"45 17 * * *\")."
   }
 }

@@ -218,10 +218,10 @@ measurement says so.
 
 `vm_schedule` (`schedule.tf`) starts and stops the bot VM every day with a Compute Engine
 instance schedule. The runtime and the ingest worker don't need one: they are on Cloud Run
-and scale to zero. Example: online 13:00–24:00 Bangkok:
+and scale to zero. Example: online 18:00–24:00 Bangkok:
 
 ```hcl
-vm_schedule = { start = "45 12 * * *", stop = "0 0 * * *", time_zone = "Asia/Bangkok" }
+vm_schedule = { start = "45 17 * * *", stop = "0 0 * * *", time_zone = "Asia/Bangkok" }
 ```
 
 * **Timing:** Google may begin a start or stop up to 15 minutes late, so the start is 15
