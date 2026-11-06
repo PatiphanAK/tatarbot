@@ -17,7 +17,7 @@ provider calls.
 | Agent Runtime | `make -C agent_runtime run` on `127.0.0.1:8080` | Cloud Run `tatarbot-runtime` (private, scales to zero) |
 | Discord bot | `make -C discord_bot run` | VM `tatarbot` (Docker, systemd `tatarbot-discord`) |
 | Model | `agent_runtime/.env` `MODEL_*` | Terraform `model_provider`; keys in `tatarbot-model-api-key` (Alibaba) / `tatarbot-openai-api-key` |
-| Schedule | while you run it | `vm_schedule` (now 13:00–24:00 Bangkok); `vm_schedule_paused = true` = 24/7 |
+| Schedule | while you run it | `vm_schedule` (now 18:00–24:00 Bangkok); `vm_schedule_paused = true` = 24/7 |
 
 Never run the bot locally and on the VM with the same `DISCORD_TOKEN`: both would answer.
 
